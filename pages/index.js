@@ -9,6 +9,9 @@ const supabase = createClient(
 export default function Home() {
   const [techs, setTechs] = useState([])
   const [jobs, setJobs] = useState([])
+  const [customerName, setCustomerName] = useState('')
+  const [serviceType, setServiceType] = useState('')
+  const [address, setAddress] = useState('')
 
   useEffect(() => {
     fetchTechs()
@@ -21,7 +24,12 @@ export default function Home() {
       .select('*')
       .order('rank_position', { ascending: true })
 
-    if (!error) setTechs(data || [])
+    if (error) {
+      console.error('TECH ERROR:', error)
+      return
+    }
+
+    setTechs(data || [])
   }
 
   async function fetchJobs() {
@@ -30,11 +38,45 @@ export default function Home() {
       .select('*')
       .order('service_date', { ascending: true })
 
-    if (!error) setJobs(data || [])
+    if (error) {
+      console.error('JOB ERROR:', error)
+      return
+    }
+
+    setJobs(data || [])
+  }
+
+  async function addJob() {
+    if (!customerName || !serviceType || !address) {
+      alert('Please fill in customer name, service type, and address.')
+      return
+    }
+
+    const { error } = await supabase.from('jobs').insert([
+      {
+        google_event_id: `manual-${Date.now()}`,
+        customer_name: customerName,
+        service_type: serviceType,
+        address: address,
+        service_date: new Date().toISOString().split('T')[0],
+        job_source: 'OTHER'
+      }
+    ])
+
+    if (error) {
+      console.error('ADD JOB ERROR:', error)
+      alert('Could not add job.')
+      return
+    }
+
+    setCustomerName('')
+    setServiceType('')
+    setAddress('')
+    fetchJobs()
   }
 
   return (
-    <div style={{ padding: 40, fontFamily: 'Arial' }}>
+    <div style={{ padding: 40, fontFamily: 'Arial, sans-serif' }}>
       <h1>Deep Cleans Routing App</h1>
 
       <h2>Technicians</h2>
@@ -42,62 +84,78 @@ export default function Home() {
         <p>No technicians yet</p>
       ) : (
         techs.map((tech) => (
-          <div key={tech.id} style={{ marginBottom: 10 }}>
-            {tech.display_name} ({tech.email || 'no email'})
+          <div key={tech.id} style={{ marginBottom: 12 }}>
+            <strong>{tech.display_name}</strong> ({tech.email || 'no email'})
           </div>
         ))
       )}
 
-<h2 style={{ marginTop: 30 }}>Add Job</h2>
+      <h2 style={{ marginTop: 32 }}>Add Job</h2>
 
-<div style={{ marginBottom: 20 }}>
-  <input
-    placeholder="Customer Name"
-    id="customer"
-    style={{ display: 'block', marginBottom: 10 }}
-  />
+      <div style={{ marginBottom: 30, maxWidth: 420 }}>
+        <input
+          type="text"
+          placeholder="Customer Name"
+          value={customerName}
+          onChange={(e) => setCustomerName(e.target.value)}
+          style={{
+            display: 'block',
+            width: '100%',
+            marginBottom: 10,
+            padding: 10,
+            fontSize: 16
+          }}
+        />
 
-  <input
-    placeholder="Service Type"
-    id="service"
-    style={{ display: 'block', marginBottom: 10 }}
-  />
+        <input
+          type="text"
+          placeholder="Service Type (example: BBQ or WINDOWS)"
+          value={serviceType}
+          onChange={(e) => setServiceType(e.target.value)}
+          style={{
+            display: 'block',
+            width: '100%',
+            marginBottom: 10,
+            padding: 10,
+            fontSize: 16
+          }}
+        />
 
-  <input
-    placeholder="Address"
-    id="address"
-    style={{ display: 'block', marginBottom: 10 }}
-  />
+        <input
+          type="text"
+          placeholder="Address"
+          value={address}
+          onChange={(e) => setAddress(e.target.value)}
+          style={{
+            display: 'block',
+            width: '100%',
+            marginBottom: 10,
+            padding: 10,
+            fontSize: 16
+          }}
+        />
 
-  <button
-    onClick={async () => {
-      const customer = document.getElementById('customer').value
-      const service = document.getElementById('service').value
-      const address = document.getElementById('address').value
+        <button
+          onClick={addJob}
+          style={{
+            padding: '10px 16px',
+            fontSize: 16,
+            cursor: 'pointer'
+          }}
+        >
+          Add Job
+        </button>
+      </div>
 
-      await supabase.from('jobs').insert([
-        {
-          customer_name: customer,
-          service_type: service,
-          address: address,
-          service_date: new Date().toISOString(),
-          job_source: 'MANUAL'
-        }
-      ])
-
-      location.reload()
-    }}
-  >
-    Add Job
-  </button>
-</div>
-      <h2 style={{ marginTop: 30 }}>Jobs</h2>
+      <h2>Jobs</h2>
       {jobs.length === 0 ? (
         <p>No jobs yet</p>
       ) : (
         jobs.map((job) => (
-          <div key={job.id} style={{ marginBottom: 12 }}>
-            <div><strong>{job.customer_name || 'Unnamed Job'}</strong></div>
+          <div key={job.id} style={{ marginBottom: 18 }}>
+            <div>
+              <strong>{job.customer_name || 'Unnamed Job'}</strong>
+            </div>
             <div>Service: {job.service_type || '-'}</div>
             <div>Address: {job.address || '-'}</div>
             <div>Date: {job.service_date || '-'}</div>
