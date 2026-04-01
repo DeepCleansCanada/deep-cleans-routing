@@ -39,8 +39,10 @@ export default function Home() {
       .order('service_date', { ascending: true })
 
     if (error) {
-      console.error('JOB ERROR:', error)
-      return
+  console.error('ADD JOB ERROR:', error)
+  alert(error.message)
+  return
+    }
     }
 
     setJobs(data || [])
