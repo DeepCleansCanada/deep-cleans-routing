@@ -75,6 +75,21 @@ export default function Home() {
     fetchJobs()
   }
 
+  async function assignTech(jobId, techId) {
+    const { error } = await supabase
+      .from('jobs')
+      .update({ technician_id: techId || null })
+      .eq('id', jobId)
+
+    if (error) {
+      console.error('ASSIGN TECH ERROR:', error)
+      alert(error.message)
+      return
+    }
+
+    fetchJobs()
+  }
+
   return (
     <div style={{ padding: 40, fontFamily: 'Arial, sans-serif' }}>
       <h1>Deep Cleans Routing App</h1>
@@ -122,7 +137,7 @@ export default function Home() {
           <option value="BBQ">BBQ</option>
           <option value="WINDOWS">WINDOWS</option>
           <option value="GUTTERS">GUTTERS</option>
-          <option value="CARPET_UPHOLSTERY">CARPET & UPHOLSTERY</option>
+          <option value="CARPET_UPHOLSTERY">CARPET &amp; UPHOLSTERY</option>
           <option value="PRESSURE_WASHING">PRESSURE WASHING</option>
           <option value="OVEN_CLEANING">OVEN CLEANING</option>
         </select>
@@ -158,16 +173,37 @@ export default function Home() {
         <p>No jobs yet</p>
       ) : (
         jobs.map((job) => (
-          <div key={job.id} style={{ marginBottom: 18 }}>
+          <div key={job.id} style={{ marginBottom: 22 }}>
             <div>
               <strong>{job.customer_name || 'Unnamed Job'}</strong>
             </div>
             <div>Service: {job.service_type || '-'}</div>
             <div>Address: {job.address || '-'}</div>
             <div>Date: {job.service_date || '-'}</div>
+
+            <div style={{ marginTop: 8 }}>
+              <select
+                value={job.technician_id || ''}
+                onChange={(e) => assignTech(job.id, e.target.value)}
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  maxWidth: 320,
+                  padding: 10,
+                  fontSize: 16
+                }}
+              >
+                <option value="">Assign Technician</option>
+                {techs.map((tech) => (
+                  <option key={tech.id} value={tech.id}>
+                    {tech.display_name}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         ))
       )}
     </div>
   )
-        }
+}
