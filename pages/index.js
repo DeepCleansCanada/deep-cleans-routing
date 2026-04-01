@@ -28,12 +28,11 @@ export default function Home() {
       <h2>Technicians</h2>
 
       {techs.length === 0 && <p>No technicians yet</p>}
-
-      {techs.map((tech) => (
-        <div key={tech.id}>
-          {tech.display_name} ({tech.email})
-        </div>
-      ))}
+{techs.map((tech) => (
+  <div key={tech.id}>
+    {tech.display_name} ({tech.email})
+  </div>
+))}
     </div>
   )
 }
