@@ -19,17 +19,27 @@ export default function Home() {
   }, [])
 
   async function fetchTechs() {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('technicians')
       .select(`*, technician_services(service_type)`)
+
+    if (error) {
+      alert(error.message)
+      return
+    }
 
     setTechs(data || [])
   }
 
   async function fetchJobs() {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('jobs')
       .select('*')
+
+    if (error) {
+      alert(error.message)
+      return
+    }
 
     setJobs(data || [])
   }
@@ -42,10 +52,12 @@ export default function Home() {
 
     const { error } = await supabase.from('jobs').insert([
       {
+        google_event_id: `manual-${Date.now()}`,
         customer_name: customerName,
         service_type: serviceType,
         address: address,
-        service_date: new Date().toISOString().split('T')[0]
+        service_date: new Date().toISOString().split('T')[0],
+        job_source: 'OTHER'
       }
     ])
 
@@ -73,8 +85,7 @@ export default function Home() {
 
     jobs.forEach((job) => {
       if (job.technician_id) {
-        counts[job.technician_id] =
-          (counts[job.technician_id] || 0) + 1
+        counts[job.technician_id] = (counts[job.technician_id] || 0) + 1
       }
     })
 
@@ -89,7 +100,6 @@ export default function Home() {
 
       if (eligible.length === 0) continue
 
-      // pick tech with lowest workload
       let bestTech = eligible[0]
       let lowestCount = jobCounts[bestTech.id] || 0
 
@@ -106,8 +116,7 @@ export default function Home() {
         .update({ technician_id: bestTech.id })
         .eq('id', job.id)
 
-      jobCounts[bestTech.id] =
-        (jobCounts[bestTech.id] || 0) + 1
+      jobCounts[bestTech.id] = (jobCounts[bestTech.id] || 0) + 1
     }
 
     fetchJobs()
@@ -120,8 +129,11 @@ export default function Home() {
 
       <h2>Technicians</h2>
       {techs.map((t) => (
-        <div key={t.id}>
-          <strong>{t.display_name}</strong>
+        <div key={t.id} style={{ marginBottom: 12 }}>
+          <div><strong>{t.display_name}</strong></div>
+          <div style={{ fontSize: 14 }}>
+            Skills: {(t.technician_services || []).map((s) => s.service_type).join(', ') || 'None'}
+          </div>
         </div>
       ))}
 
@@ -131,32 +143,37 @@ export default function Home() {
         placeholder="Customer Name"
         value={customerName}
         onChange={(e) => setCustomerName(e.target.value)}
+        style={{ display: 'block', marginBottom: 10, padding: 10, width: '100%', maxWidth: 420 }}
       />
-      <br />
 
       <select
         value={serviceType}
         onChange={(e) => setServiceType(e.target.value)}
+        style={{ display: 'block', marginBottom: 10, padding: 10, width: '100%', maxWidth: 420 }}
       >
-        <option value="">Select Service</option>
+        <option value="">Select Service Type</option>
         <option value="BBQ">BBQ</option>
         <option value="WINDOWS">WINDOWS</option>
         <option value="GUTTERS">GUTTERS</option>
+        <option value="CARPET_UPHOLSTERY">CARPET &amp; UPHOLSTERY</option>
+        <option value="PRESSURE_WASHING">PRESSURE WASHING</option>
+        <option value="OVEN_CLEANING">OVEN CLEANING</option>
       </select>
-      <br />
 
       <input
         placeholder="Address"
         value={address}
         onChange={(e) => setAddress(e.target.value)}
+        style={{ display: 'block', marginBottom: 10, padding: 10, width: '100%', maxWidth: 420 }}
       />
-      <br />
 
-      <button onClick={addJob}>Add Job</button>
+      <button onClick={addJob} style={{ marginBottom: 30 }}>
+        Add Job
+      </button>
 
       <h2>Jobs</h2>
 
-      <button onClick={autoAssign}>
+      <button onClick={autoAssign} style={{ marginBottom: 20 }}>
         Auto Assign Jobs
       </button>
 
@@ -165,14 +182,12 @@ export default function Home() {
           <strong>{job.customer_name}</strong>
           <div>Service: {job.service_type}</div>
           <div>Address: {job.address}</div>
-
           <div>
             Assigned:{' '}
-            {techs.find((t) => t.id === job.technician_id)
-              ?.display_name || 'None'}
+            {techs.find((t) => t.id === job.technician_id)?.display_name || 'None'}
           </div>
         </div>
       ))}
     </div>
   )
-                                    }
+        }
