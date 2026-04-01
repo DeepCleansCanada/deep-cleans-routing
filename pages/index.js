@@ -90,6 +90,49 @@ export default function Home() {
     Add Job
   </button>
 </div>
+<h2 style={{ marginTop: 30 }}>Add Job</h2>
+
+<div style={{ marginBottom: 20 }}>
+  <input
+    placeholder="Customer Name"
+    id="customer"
+    style={{ display: 'block', marginBottom: 10 }}
+  />
+
+  <input
+    placeholder="Service Type"
+    id="service"
+    style={{ display: 'block', marginBottom: 10 }}
+  />
+
+  <input
+    placeholder="Address"
+    id="address"
+    style={{ display: 'block', marginBottom: 10 }}
+  />
+
+  <button
+    onClick={async () => {
+      const customer = document.getElementById('customer').value
+      const service = document.getElementById('service').value
+      const address = document.getElementById('address').value
+
+      await supabase.from('jobs').insert([
+        {
+          customer_name: customer,
+          service_type: service,
+          address: address,
+          service_date: new Date().toISOString(),
+          job_source: 'MANUAL'
+        }
+      ])
+
+      location.reload()
+    }}
+  >
+    Add Job
+  </button>
+</div>
       <h2 style={{ marginTop: 30 }}>Jobs</h2>
       {jobs.length === 0 ? (
         <p>No jobs yet</p>
