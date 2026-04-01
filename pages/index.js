@@ -19,57 +19,37 @@ export default function Home() {
   }, [])
 
   async function fetchTechs() {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from('technicians')
-      .select(`
-        *,
-        technician_services (
-          service_type
-        )
-      `)
-      .order('rank_position', { ascending: true })
-
-    if (error) {
-      console.error('TECH ERROR:', error)
-      return
-    }
+      .select(`*, technician_services(service_type)`)
 
     setTechs(data || [])
   }
 
   async function fetchJobs() {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from('jobs')
       .select('*')
-      .order('service_date', { ascending: true })
-
-    if (error) {
-      console.error('JOB ERROR:', error)
-      return
-    }
 
     setJobs(data || [])
   }
 
   async function addJob() {
     if (!customerName || !serviceType || !address) {
-      alert('Please fill in customer name, service type, and address.')
+      alert('Fill all fields')
       return
     }
 
     const { error } = await supabase.from('jobs').insert([
       {
-        google_event_id: `manual-${Date.now()}`,
         customer_name: customerName,
         service_type: serviceType,
         address: address,
-        service_date: new Date().toISOString().split('T')[0],
-        job_source: 'OTHER'
+        service_date: new Date().toISOString().split('T')[0]
       }
     ])
 
     if (error) {
-      console.error('ADD JOB ERROR:', error)
       alert(error.message)
       return
     }
@@ -80,231 +60,119 @@ export default function Home() {
     fetchJobs()
   }
 
-  function getEligibleTechs(jobServiceType) {
-    return techs.filter((tech) =>
-      (tech.technician_services || []).some(
-        (svc) => svc.service_type === jobServiceType
+  function getEligibleTechs(service) {
+    return techs.filter((t) =>
+      (t.technician_services || []).some(
+        (s) => s.service_type === service
       )
     )
   }
 
-  async function assignTech(jobId, techId, jobServiceType) {
-    if (!techId) {
-      const { error } = await supabase
-        .from('jobs')
-        .update({ technician_id: null })
-        .eq('id', jobId)
+  function getJobCounts() {
+    const counts = {}
 
-      if (error) {
-        console.error('UNASSIGN TECH ERROR:', error)
-        alert(error.message)
-        return
+    jobs.forEach((job) => {
+      if (job.technician_id) {
+        counts[job.technician_id] =
+          (counts[job.technician_id] || 0) + 1
       }
+    })
 
-      fetchJobs()
-      return
-    }
-
-    const chosenTech = techs.find((t) => t.id === techId)
-    const chosenTechSkills = (chosenTech?.technician_services || []).map(
-      (s) => s.service_type
-    )
-
-    if (!chosenTechSkills.includes(jobServiceType)) {
-      alert('That technician is not qualified for this service.')
-      return
-    }
-
-    const { error } = await supabase
-      .from('jobs')
-      .update({ technician_id: techId })
-      .eq('id', jobId)
-
-    if (error) {
-      console.error('ASSIGN TECH ERROR:', error)
-      alert(error.message)
-      return
-    }
-
-    fetchJobs()
+    return counts
   }
 
   async function autoAssign() {
-    if (techs.length === 0) {
-      alert('No technicians available')
-      return
-    }
+    const jobCounts = getJobCounts()
 
     for (const job of jobs) {
-      const matchingTechs = getEligibleTechs(job.service_type)
+      const eligible = getEligibleTechs(job.service_type)
 
-      if (matchingTechs.length > 0) {
-        const chosenTech = matchingTechs[0]
+      if (eligible.length === 0) continue
 
-        const { error } = await supabase
-          .from('jobs')
-          .update({ technician_id: chosenTech.id })
-          .eq('id', job.id)
+      // pick tech with lowest workload
+      let bestTech = eligible[0]
+      let lowestCount = jobCounts[bestTech.id] || 0
 
-        if (error) {
-          console.error('AUTO ASSIGN ERROR:', error)
+      for (const tech of eligible) {
+        const count = jobCounts[tech.id] || 0
+        if (count < lowestCount) {
+          bestTech = tech
+          lowestCount = count
         }
-      } else {
-        await supabase
-          .from('jobs')
-          .update({ technician_id: null })
-          .eq('id', job.id)
       }
+
+      await supabase
+        .from('jobs')
+        .update({ technician_id: bestTech.id })
+        .eq('id', job.id)
+
+      jobCounts[bestTech.id] =
+        (jobCounts[bestTech.id] || 0) + 1
     }
 
     fetchJobs()
-    alert('Jobs auto-assigned by service match')
+    alert('Smart assignment complete')
   }
 
   return (
-    <div style={{ padding: 40, fontFamily: 'Arial, sans-serif' }}>
+    <div style={{ padding: 40 }}>
       <h1>Deep Cleans Routing App</h1>
 
       <h2>Technicians</h2>
-      {techs.length === 0 ? (
-        <p>No technicians yet</p>
-      ) : (
-        techs.map((tech) => (
-          <div key={tech.id} style={{ marginBottom: 16 }}>
-            <div>
-              <strong>{tech.display_name}</strong> ({tech.email || 'no email'})
-            </div>
-            <div style={{ fontSize: 14, color: '#444' }}>
-              Skills:{' '}
-              {(tech.technician_services || []).length > 0
-                ? tech.technician_services.map((s) => s.service_type).join(', ')
-                : 'None'}
-            </div>
-          </div>
-        ))
-      )}
+      {techs.map((t) => (
+        <div key={t.id}>
+          <strong>{t.display_name}</strong>
+        </div>
+      ))}
 
-      <h2 style={{ marginTop: 32 }}>Add Job</h2>
+      <h2>Add Job</h2>
 
-      <div style={{ marginBottom: 30, maxWidth: 420 }}>
-        <input
-          type="text"
-          placeholder="Customer Name"
-          value={customerName}
-          onChange={(e) => setCustomerName(e.target.value)}
-          style={{
-            display: 'block',
-            width: '100%',
-            marginBottom: 10,
-            padding: 10,
-            fontSize: 16
-          }}
-        />
+      <input
+        placeholder="Customer Name"
+        value={customerName}
+        onChange={(e) => setCustomerName(e.target.value)}
+      />
+      <br />
 
-        <select
-          value={serviceType}
-          onChange={(e) => setServiceType(e.target.value)}
-          style={{
-            display: 'block',
-            width: '100%',
-            marginBottom: 10,
-            padding: 10,
-            fontSize: 16
-          }}
-        >
-          <option value="">Select Service Type</option>
-          <option value="BBQ">BBQ</option>
-          <option value="WINDOWS">WINDOWS</option>
-          <option value="GUTTERS">GUTTERS</option>
-          <option value="CARPET_UPHOLSTERY">CARPET &amp; UPHOLSTERY</option>
-          <option value="PRESSURE_WASHING">PRESSURE WASHING</option>
-          <option value="OVEN_CLEANING">OVEN CLEANING</option>
-        </select>
+      <select
+        value={serviceType}
+        onChange={(e) => setServiceType(e.target.value)}
+      >
+        <option value="">Select Service</option>
+        <option value="BBQ">BBQ</option>
+        <option value="WINDOWS">WINDOWS</option>
+        <option value="GUTTERS">GUTTERS</option>
+      </select>
+      <br />
 
-        <input
-          type="text"
-          placeholder="Address"
-          value={address}
-          onChange={(e) => setAddress(e.target.value)}
-          style={{
-            display: 'block',
-            width: '100%',
-            marginBottom: 10,
-            padding: 10,
-            fontSize: 16
-          }}
-        />
+      <input
+        placeholder="Address"
+        value={address}
+        onChange={(e) => setAddress(e.target.value)}
+      />
+      <br />
 
-        <button
-          onClick={addJob}
-          style={{
-            padding: '10px 16px',
-            fontSize: 16,
-            cursor: 'pointer'
-          }}
-        >
-          Add Job
-        </button>
-      </div>
+      <button onClick={addJob}>Add Job</button>
 
       <h2>Jobs</h2>
 
-      <button
-        onClick={autoAssign}
-        style={{
-          marginBottom: 20,
-          padding: '10px 16px',
-          fontWeight: 'bold',
-          cursor: 'pointer'
-        }}
-      >
+      <button onClick={autoAssign}>
         Auto Assign Jobs
       </button>
 
-      {jobs.length === 0 ? (
-        <p>No jobs yet</p>
-      ) : (
-        jobs.map((job) => {
-          const eligibleTechs = getEligibleTechs(job.service_type)
-          const assignedIsEligible = eligibleTechs.some(
-            (tech) => tech.id === job.technician_id
-          )
+      {jobs.map((job) => (
+        <div key={job.id} style={{ marginTop: 20 }}>
+          <strong>{job.customer_name}</strong>
+          <div>Service: {job.service_type}</div>
+          <div>Address: {job.address}</div>
 
-          return (
-            <div key={job.id} style={{ marginBottom: 22 }}>
-              <div>
-                <strong>{job.customer_name || 'Unnamed Job'}</strong>
-              </div>
-              <div>Service: {job.service_type || '-'}</div>
-              <div>Address: {job.address || '-'}</div>
-              <div>Date: {job.service_date || '-'}</div>
-
-              <div style={{ marginTop: 8 }}>
-                <select
-                  value={assignedIsEligible ? job.technician_id || '' : ''}
-                  onChange={(e) =>
-                    assignTech(job.id, e.target.value, job.service_type)
-                  }
-                  style={{
-                    display: 'block',
-                    width: '100%',
-                    maxWidth: 320,
-                    padding: 10,
-                    fontSize: 16
-                  }}
-                >
-                  <option value="">Assign Technician</option>
-                  {eligibleTechs.map((tech) => (
-                    <option key={tech.id} value={tech.id}>
-                      {tech.display_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          )
-        })
-      )}
+          <div>
+            Assigned:{' '}
+            {techs.find((t) => t.id === job.technician_id)
+              ?.display_name || 'None'}
+          </div>
+        </div>
+      ))}
     </div>
   )
-                    }
+                                    }
