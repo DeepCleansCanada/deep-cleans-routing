@@ -109,19 +109,25 @@ export default function Home() {
           }}
         />
 
-        <input
-          type="text"
-          placeholder="Service Type (example: BBQ or WINDOWS)"
-          value={serviceType}
-          onChange={(e) => setServiceType(e.target.value)}
-          style={{
-            display: 'block',
-            width: '100%',
-            marginBottom: 10,
-            padding: 10,
-            fontSize: 16
-          }}
-        />
+        <select
+  value={serviceType}
+  onChange={(e) => setServiceType(e.target.value)}
+  style={{
+    display: 'block',
+    width: '100%',
+    marginBottom: 10,
+    padding: 10,
+    fontSize: 16
+  }}
+>
+  <option value="">Select Service Type</option>
+  <option value="BBQ">BBQ</option>
+  <option value="WINDOWS">WINDOWS</option>
+  <option value="GUTTERS">GUTTERS</option>
+  <option value="CARPET_UPHOLSTERY">CARPET & UPHOLSTERY</option>
+  <option value="PRESSURE_WASHING">PRESSURE WASHING</option>
+  <option value="OVEN_CLEANING">OVEN CLEANING</option>
+</select>
 
         <input
           type="text"
