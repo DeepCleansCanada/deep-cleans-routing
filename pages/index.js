@@ -1,38 +1,39 @@
-import { useEffect, useState } from "react";
-import { supabase } from "../lib/supabase";
+import { createClient } from '@supabase/supabase-js'
+import { useEffect, useState } from 'react'
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+)
 
 export default function Home() {
-  const [techs, setTechs] = useState([]);
+  const [techs, setTechs] = useState([])
 
   useEffect(() => {
-    fetchTechs();
-  }, []);
+    async function fetchTechs() {
+      const { data, error } = await supabase
+        .from('technicians')
+        .select('*')
 
-  async function fetchTechs() {
-    const { data, error } = await supabase.from("technicians").select("*");
-
-    if (error) {
-      console.error(error);
-    } else {
-      setTechs(data);
+      if (!error) setTechs(data)
     }
-  }
+
+    fetchTechs()
+  }, [])
 
   return (
-    <div style={{ padding: 40, fontFamily: "Arial" }}>
+    <div style={{ padding: 40 }}>
       <h1>Deep Cleans Routing App</h1>
 
       <h2>Technicians</h2>
 
-      {techs.length === 0 ? (
-        <p>No technicians yet</p>
-      ) : (
-        techs.map((t) => (
-          <div key={t.id}>
-            {t.display_name} (Rank: {t.rank_position})
-          </div>
-        ))
-      )}
+      {techs.length === 0 && <p>No technicians yet</p>}
+
+      {techs.map((tech) => (
+        <div key={tech.id}>
+          {tech.display_name} ({tech.email})
+        </div>
+      ))}
     </div>
-  );
+  )
 }
