@@ -39,10 +39,8 @@ export default function Home() {
       .order('service_date', { ascending: true })
 
     if (error) {
-  console.error('ADD JOB ERROR:', error)
-  alert(error.message)
-  return
-    }
+      console.error('JOB ERROR:', error)
+      return
     }
 
     setJobs(data || [])
@@ -67,7 +65,7 @@ export default function Home() {
 
     if (error) {
       console.error('ADD JOB ERROR:', error)
-      alert('Could not add job.')
+      alert(error.message)
       return
     }
 
@@ -110,24 +108,24 @@ export default function Home() {
         />
 
         <select
-  value={serviceType}
-  onChange={(e) => setServiceType(e.target.value)}
-  style={{
-    display: 'block',
-    width: '100%',
-    marginBottom: 10,
-    padding: 10,
-    fontSize: 16
-  }}
->
-  <option value="">Select Service Type</option>
-  <option value="BBQ">BBQ</option>
-  <option value="WINDOWS">WINDOWS</option>
-  <option value="GUTTERS">GUTTERS</option>
-  <option value="CARPET_UPHOLSTERY">CARPET & UPHOLSTERY</option>
-  <option value="PRESSURE_WASHING">PRESSURE WASHING</option>
-  <option value="OVEN_CLEANING">OVEN CLEANING</option>
-</select>
+          value={serviceType}
+          onChange={(e) => setServiceType(e.target.value)}
+          style={{
+            display: 'block',
+            width: '100%',
+            marginBottom: 10,
+            padding: 10,
+            fontSize: 16
+          }}
+        >
+          <option value="">Select Service Type</option>
+          <option value="BBQ">BBQ</option>
+          <option value="WINDOWS">WINDOWS</option>
+          <option value="GUTTERS">GUTTERS</option>
+          <option value="CARPET_UPHOLSTERY">CARPET & UPHOLSTERY</option>
+          <option value="PRESSURE_WASHING">PRESSURE WASHING</option>
+          <option value="OVEN_CLEANING">OVEN CLEANING</option>
+        </select>
 
         <input
           type="text"
@@ -172,4 +170,4 @@ export default function Home() {
       )}
     </div>
   )
-}
+        }
