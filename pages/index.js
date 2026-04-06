@@ -17,6 +17,33 @@ function getTomorrowDateString() {
   return d.toISOString().split('T')[0]
 }
 
+function getTomorrowDateRange() {
+  const start = new Date()
+  start.setDate(start.getDate() + 1)
+  start.setHours(0, 0, 0, 0)
+
+  const end = new Date(start)
+  end.setDate(end.getDate() + 1)
+
+  return {
+    timeMin: start.toISOString(),
+    timeMax: end.toISOString()
+  }
+}
+
+function parseServiceType(text) {
+  const upper = (text || '').toUpperCase()
+
+  if (upper.includes('BBQ')) return 'BBQ'
+  if (upper.includes('WINDOW')) return 'WINDOWS'
+  if (upper.includes('GUTTER')) return 'GUTTERS'
+  if (upper.includes('CARPET') || upper.includes('UPHOLSTERY')) return 'CARPET_UPHOLSTERY'
+  if (upper.includes('PRESSURE')) return 'PRESSURE_WASHING'
+  if (upper.includes('OVEN')) return 'OVEN_CLEANING'
+
+  return 'BBQ'
+}
+
 export default function Home() {
   const [techs, setTechs] = useState([])
   const [jobs, setJobs] = useState([])
@@ -39,6 +66,7 @@ export default function Home() {
     const { data, error } = await supabase
       .from('technicians')
       .select(`*, technician_services(service_type)`)
+      .order('rank_position', { ascending: true })
 
     if (error) {
       alert(error.message)
@@ -94,6 +122,68 @@ export default function Home() {
     })
 
     tokenClient.requestAccessToken()
+  }
+
+  async function importTomorrowFromGoogleCalendar() {
+    if (!accessToken) {
+      alert('Connect Google Calendar first')
+      return
+    }
+
+    const { timeMin, timeMax } = getTomorrowDateRange()
+
+    const url =
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events` +
+      `?timeMin=${encodeURIComponent(timeMin)}` +
+      `&timeMax=${encodeURIComponent(timeMax)}` +
+      `&singleEvents=true&orderBy=startTime`
+
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    })
+
+    const result = await response.json()
+
+    if (!response.ok) {
+      alert(result.error?.message || 'Failed to fetch calendar events')
+      return
+    }
+
+    const events = result.items || []
+
+    for (const event of events) {
+      const customerNameFromEvent = event.summary || 'Calendar Job'
+      const description = event.description || ''
+      const location = event.location || ''
+      const serviceTypeFromEvent = parseServiceType(
+        `${event.summary || ''} ${description}`
+      )
+
+      const { error } = await supabase
+        .from('jobs')
+        .upsert(
+          [
+            {
+              google_event_id: event.id,
+              customer_name: customerNameFromEvent,
+              service_type: serviceTypeFromEvent,
+              address: location,
+              service_date: tomorrow,
+              job_source: 'GOOGLE_CALENDAR'
+            }
+          ],
+          { onConflict: 'google_event_id' }
+        )
+
+      if (error) {
+        console.error('IMPORT ERROR:', error)
+      }
+    }
+
+    fetchJobs()
+    alert(`Imported ${events.length} calendar events for tomorrow`)
   }
 
   async function addJob() {
@@ -211,12 +301,12 @@ export default function Home() {
       <h1>Deep Cleans Routing App</h1>
 
       <div style={{ marginBottom: 20 }}>
-        <button
-          onClick={connectGoogleCalendar}
-          disabled={!googleReady}
-          style={{ marginRight: 10 }}
-        >
+        <button onClick={connectGoogleCalendar} disabled={!googleReady} style={{ marginRight: 10 }}>
           {accessToken ? 'Google Calendar Connected' : 'Connect Google Calendar'}
+        </button>
+
+        <button onClick={importTomorrowFromGoogleCalendar} disabled={!accessToken}>
+          Pull Tomorrow From Google Calendar
         </button>
       </div>
 
@@ -273,7 +363,7 @@ export default function Home() {
 
       <h2>Tomorrow's Jobs</h2>
 
-      <button onClick={routeTomorrow} style={{ marginBottom: 20, marginRight: 10 }}>
+      <button onClick={routeTomorrow} style={{ marginBottom: 20 }}>
         Route Tomorrow
       </button>
 
@@ -284,7 +374,7 @@ export default function Home() {
           <div key={job.id} style={{ marginTop: 20 }}>
             <strong>{job.customer_name}</strong>
             <div>Service: {job.service_type}</div>
-            <div>Address: {job.address}</div>
+            <div>Address: {job.address || 'No address'}</div>
             <div>Date: {job.service_date}</div>
             <div>
               Assigned:{' '}
@@ -316,7 +406,7 @@ export default function Home() {
           <div key={job.id} style={{ marginTop: 20, opacity: 0.8 }}>
             <strong>{job.customer_name}</strong>
             <div>Service: {job.service_type}</div>
-            <div>Address: {job.address}</div>
+            <div>Address: {job.address || 'No address'}</div>
             <div>Date: {job.service_date}</div>
             <div>
               Assigned:{' '}
