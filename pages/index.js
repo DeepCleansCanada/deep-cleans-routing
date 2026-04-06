@@ -10,6 +10,7 @@ type Job = {
   end?: string;
   source?: "manual" | "google" | string;
   date?: string;
+  calendarName?: string;
 };
 
 type GoogleStatusResponse = {
@@ -26,6 +27,8 @@ type ImportTomorrowResponse = {
   imported?: number;
   skipped?: number;
   calendarId?: string;
+  calendarIds?: string[];
+  calendarNames?: string[];
   timeMin?: string;
   timeMax?: string;
   samples?: any[];
@@ -67,6 +70,17 @@ function getTorontoTomorrowLabel() {
 
 export default function IndexPage() {
   const tomorrowLabel = useMemo(() => getTorontoTomorrowLabel(), []);
+
+  const bookingCalendars = [
+    "BBQ Bookings",
+    "Carpet Cleaning Bookings",
+    "Internal Booking",
+    "Jiffy Lawn Bookings",
+    "Power Washing",
+    "Residential Deep Clean Bookings",
+    "Windows/Eaves",
+  ];
+
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loadingJobs, setLoadingJobs] = useState(false);
   const [routingTomorrow, setRoutingTomorrow] = useState(false);
@@ -80,7 +94,7 @@ export default function IndexPage() {
     setDebugLog((prev) => [
       `${new Date().toLocaleTimeString()}: ${message}`,
       ...prev,
-    ].slice(0, 50));
+    ].slice(0, 60));
   };
 
   const fetchGoogleStatus = async () => {
@@ -89,6 +103,7 @@ export default function IndexPage() {
       const res = await fetch("/api/google/status");
       const data = await res.json();
       setGoogleStatus(data);
+
       if (data?.connected) {
         addLog(`Google connected${data.email ? ` as ${data.email}` : ""}`);
       } else {
@@ -124,6 +139,8 @@ export default function IndexPage() {
   const importTomorrowFromGoogle = async () => {
     try {
       addLog("Starting Google Calendar import for tomorrow...");
+      addLog(`Calendars selected: ${bookingCalendars.join(", ")}`);
+
       const res = await fetch("/api/google/import-tomorrow", {
         method: "POST",
         headers: {
@@ -132,6 +149,7 @@ export default function IndexPage() {
         body: JSON.stringify({
           timeZone: "America/Toronto",
           date: tomorrowLabel,
+          calendarNames: bookingCalendars,
         }),
       });
 
@@ -146,8 +164,8 @@ export default function IndexPage() {
         `Google import finished. fetched=${data.fetched ?? 0}, imported=${data.imported ?? 0}, skipped=${data.skipped ?? 0}`
       );
 
-      if (data?.calendarId) {
-        addLog(`Calendar used: ${data.calendarId}`);
+      if (Array.isArray(data?.calendarNames) && data.calendarNames.length > 0) {
+        addLog(`Imported from: ${data.calendarNames.join(", ")}`);
       }
 
       if ((data?.fetched ?? 0) === 0) {
@@ -176,7 +194,7 @@ export default function IndexPage() {
       setLastRouteResult(null);
 
       addLog("Route Tomorrow clicked");
-      addLog("Step 1: import tomorrow's Google Calendar events");
+      addLog("Step 1: import tomorrow's Google Calendar events from all booking calendars");
 
       await importTomorrowFromGoogle();
 
@@ -235,7 +253,7 @@ export default function IndexPage() {
     >
       <div
         style={{
-          maxWidth: 1200,
+          maxWidth: 1280,
           margin: "0 auto",
           display: "grid",
           gap: 20,
@@ -254,12 +272,34 @@ export default function IndexPage() {
             Tomorrow: <strong>{tomorrowLabel}</strong> (America/Toronto)
           </p>
 
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontSize: 13, color: "#555", marginBottom: 8 }}>
+              Booking calendars included
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {bookingCalendars.map((name) => (
+                <span
+                  key={name}
+                  style={{
+                    fontSize: 12,
+                    padding: "6px 10px",
+                    borderRadius: 999,
+                    background: "#eef3ff",
+                    border: "1px solid #d8e2ff",
+                  }}
+                >
+                  {name}
+                </span>
+              ))}
+            </div>
+          </div>
+
           <div
             style={{
               display: "flex",
               flexWrap: "wrap",
               gap: 12,
-              marginTop: 16,
+              marginTop: 18,
             }}
           >
             <button
@@ -350,14 +390,13 @@ export default function IndexPage() {
             <h2 style={{ marginTop: 0 }}>Google Status</h2>
             <div style={{ fontSize: 14, lineHeight: 1.8 }}>
               <div>
-                Connected:{" "}
-                <strong>{googleStatus?.connected ? "Yes" : "No"}</strong>
+                Connected: <strong>{googleStatus?.connected ? "Yes" : "No"}</strong>
               </div>
               <div>
                 Email: <strong>{googleStatus?.email || "-"}</strong>
               </div>
               <div>
-                Calendar ID: <strong>{googleStatus?.calendarId || "-"}</strong>
+                Default Calendar ID: <strong>{googleStatus?.calendarId || "-"}</strong>
               </div>
             </div>
           </div>
@@ -442,6 +481,7 @@ export default function IndexPage() {
                     </div>
 
                     <div style={{ marginTop: 8, fontSize: 14, color: "#555" }}>
+                      <div>Calendar: {job.calendarName || "-"}</div>
                       <div>Address: {job.address || "-"}</div>
                       <div>Assigned To: {job.assignedTo || "-"}</div>
                       <div>Start: {job.start || "-"}</div>
