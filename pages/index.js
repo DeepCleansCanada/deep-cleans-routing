@@ -6,6 +6,11 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 )
 
+const GOOGLE_CLIENT_ID =
+  '666287584933-5mio8k83tmh829rnd22728q37snt71mk.apps.googleusercontent.com'
+
+const GOOGLE_SCOPE = 'https://www.googleapis.com/auth/calendar'
+
 function getTomorrowDateString() {
   const d = new Date()
   d.setDate(d.getDate() + 1)
@@ -19,19 +24,21 @@ export default function Home() {
   const [serviceType, setServiceType] = useState('')
   const [address, setAddress] = useState('')
   const [serviceDate, setServiceDate] = useState(getTomorrowDateString())
+  const [googleReady, setGoogleReady] = useState(false)
+  const [accessToken, setAccessToken] = useState('')
 
   const tomorrow = useMemo(() => getTomorrowDateString(), [])
 
   useEffect(() => {
     fetchTechs()
     fetchJobs()
+    loadGoogleScript()
   }, [])
 
   async function fetchTechs() {
     const { data, error } = await supabase
       .from('technicians')
       .select(`*, technician_services(service_type)`)
-      .order('rank_position', { ascending: true })
 
     if (error) {
       alert(error.message)
@@ -53,6 +60,40 @@ export default function Home() {
     }
 
     setJobs(data || [])
+  }
+
+  function loadGoogleScript() {
+    if (window.google && window.google.accounts) {
+      setGoogleReady(true)
+      return
+    }
+
+    const script = document.createElement('script')
+    script.src = 'https://accounts.google.com/gsi/client'
+    script.async = true
+    script.defer = true
+    script.onload = () => setGoogleReady(true)
+    document.body.appendChild(script)
+  }
+
+  function connectGoogleCalendar() {
+    if (!window.google || !window.google.accounts || !window.google.accounts.oauth2) {
+      alert('Google API not ready yet')
+      return
+    }
+
+    const tokenClient = window.google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: GOOGLE_SCOPE,
+      callback: (response) => {
+        if (response.access_token) {
+          setAccessToken(response.access_token)
+          alert('Google Calendar connected')
+        }
+      }
+    })
+
+    tokenClient.requestAccessToken()
   }
 
   async function addJob() {
@@ -169,6 +210,16 @@ export default function Home() {
     <div style={{ padding: 40 }}>
       <h1>Deep Cleans Routing App</h1>
 
+      <div style={{ marginBottom: 20 }}>
+        <button
+          onClick={connectGoogleCalendar}
+          disabled={!googleReady}
+          style={{ marginRight: 10 }}
+        >
+          {accessToken ? 'Google Calendar Connected' : 'Connect Google Calendar'}
+        </button>
+      </div>
+
       <h2>Technicians</h2>
       {techs.map((t) => (
         <div key={t.id} style={{ marginBottom: 12 }}>
@@ -222,7 +273,7 @@ export default function Home() {
 
       <h2>Tomorrow's Jobs</h2>
 
-      <button onClick={routeTomorrow} style={{ marginBottom: 20 }}>
+      <button onClick={routeTomorrow} style={{ marginBottom: 20, marginRight: 10 }}>
         Route Tomorrow
       </button>
 
