@@ -1,10 +1,16 @@
 import { createClient } from '@supabase/supabase-js'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 )
+
+function getTomorrowDateString() {
+  const d = new Date()
+  d.setDate(d.getDate() + 1)
+  return d.toISOString().split('T')[0]
+}
 
 export default function Home() {
   const [techs, setTechs] = useState([])
@@ -12,6 +18,9 @@ export default function Home() {
   const [customerName, setCustomerName] = useState('')
   const [serviceType, setServiceType] = useState('')
   const [address, setAddress] = useState('')
+  const [serviceDate, setServiceDate] = useState(getTomorrowDateString())
+
+  const tomorrow = useMemo(() => getTomorrowDateString(), [])
 
   useEffect(() => {
     fetchTechs()
@@ -22,6 +31,7 @@ export default function Home() {
     const { data, error } = await supabase
       .from('technicians')
       .select(`*, technician_services(service_type)`)
+      .order('rank_position', { ascending: true })
 
     if (error) {
       alert(error.message)
@@ -35,6 +45,7 @@ export default function Home() {
     const { data, error } = await supabase
       .from('jobs')
       .select('*')
+      .order('service_date', { ascending: true })
 
     if (error) {
       alert(error.message)
@@ -45,7 +56,7 @@ export default function Home() {
   }
 
   async function addJob() {
-    if (!customerName || !serviceType || !address) {
+    if (!customerName || !serviceType || !address || !serviceDate) {
       alert('Fill all fields')
       return
     }
@@ -55,8 +66,8 @@ export default function Home() {
         google_event_id: `manual-${Date.now()}`,
         customer_name: customerName,
         service_type: serviceType,
-        address: address,
-        service_date: new Date().toISOString().split('T')[0],
+        address,
+        service_date: serviceDate,
         job_source: 'OTHER'
       }
     ])
@@ -69,6 +80,7 @@ export default function Home() {
     setCustomerName('')
     setServiceType('')
     setAddress('')
+    setServiceDate(getTomorrowDateString())
     fetchJobs()
   }
 
@@ -80,10 +92,10 @@ export default function Home() {
     )
   }
 
-  function getJobCounts() {
+  function getJobCountsForJobs(targetJobs) {
     const counts = {}
 
-    jobs.forEach((job) => {
+    targetJobs.forEach((job) => {
       if (job.technician_id) {
         counts[job.technician_id] = (counts[job.technician_id] || 0) + 1
       }
@@ -92,13 +104,40 @@ export default function Home() {
     return counts
   }
 
-  async function autoAssign() {
-    const jobCounts = getJobCounts()
+  async function assignTech(jobId, techId) {
+    const { error } = await supabase
+      .from('jobs')
+      .update({ technician_id: techId || null })
+      .eq('id', jobId)
 
-    for (const job of jobs) {
+    if (error) {
+      alert(error.message)
+      return
+    }
+
+    fetchJobs()
+  }
+
+  async function routeTomorrow() {
+    const tomorrowJobs = jobs.filter((job) => job.service_date === tomorrow)
+
+    if (tomorrowJobs.length === 0) {
+      alert('No jobs scheduled for tomorrow')
+      return
+    }
+
+    const jobCounts = getJobCountsForJobs(tomorrowJobs)
+
+    for (const job of tomorrowJobs) {
       const eligible = getEligibleTechs(job.service_type)
 
-      if (eligible.length === 0) continue
+      if (eligible.length === 0) {
+        await supabase
+          .from('jobs')
+          .update({ technician_id: null })
+          .eq('id', job.id)
+        continue
+      }
 
       let bestTech = eligible[0]
       let lowestCount = jobCounts[bestTech.id] || 0
@@ -120,8 +159,11 @@ export default function Home() {
     }
 
     fetchJobs()
-    alert('Smart assignment complete')
+    alert('Tomorrow jobs routed')
   }
+
+  const tomorrowJobs = jobs.filter((job) => job.service_date === tomorrow)
+  const otherJobs = jobs.filter((job) => job.service_date !== tomorrow)
 
   return (
     <div style={{ padding: 40 }}>
@@ -161,6 +203,13 @@ export default function Home() {
       </select>
 
       <input
+        type="date"
+        value={serviceDate}
+        onChange={(e) => setServiceDate(e.target.value)}
+        style={{ display: 'block', marginBottom: 10, padding: 10, width: '100%', maxWidth: 420 }}
+      />
+
+      <input
         placeholder="Address"
         value={address}
         onChange={(e) => setAddress(e.target.value)}
@@ -171,23 +220,60 @@ export default function Home() {
         Add Job
       </button>
 
-      <h2>Jobs</h2>
+      <h2>Tomorrow's Jobs</h2>
 
-      <button onClick={autoAssign} style={{ marginBottom: 20 }}>
-        Auto Assign Jobs
+      <button onClick={routeTomorrow} style={{ marginBottom: 20 }}>
+        Route Tomorrow
       </button>
 
-      {jobs.map((job) => (
-        <div key={job.id} style={{ marginTop: 20 }}>
-          <strong>{job.customer_name}</strong>
-          <div>Service: {job.service_type}</div>
-          <div>Address: {job.address}</div>
-          <div>
-            Assigned:{' '}
-            {techs.find((t) => t.id === job.technician_id)?.display_name || 'None'}
+      {tomorrowJobs.length === 0 ? (
+        <p>No jobs scheduled for tomorrow.</p>
+      ) : (
+        tomorrowJobs.map((job) => (
+          <div key={job.id} style={{ marginTop: 20 }}>
+            <strong>{job.customer_name}</strong>
+            <div>Service: {job.service_type}</div>
+            <div>Address: {job.address}</div>
+            <div>Date: {job.service_date}</div>
+            <div>
+              Assigned:{' '}
+              {techs.find((t) => t.id === job.technician_id)?.display_name || 'None'}
+            </div>
+
+            <select
+              value={job.technician_id || ''}
+              onChange={(e) => assignTech(job.id, e.target.value)}
+              style={{ display: 'block', marginTop: 8, padding: 10, width: '100%', maxWidth: 320 }}
+            >
+              <option value="">Assign Technician</option>
+              {getEligibleTechs(job.service_type).map((tech) => (
+                <option key={tech.id} value={tech.id}>
+                  {tech.display_name}
+                </option>
+              ))}
+            </select>
           </div>
-        </div>
-      ))}
+        ))
+      )}
+
+      <h2 style={{ marginTop: 40 }}>Other Jobs</h2>
+
+      {otherJobs.length === 0 ? (
+        <p>No other jobs.</p>
+      ) : (
+        otherJobs.map((job) => (
+          <div key={job.id} style={{ marginTop: 20, opacity: 0.8 }}>
+            <strong>{job.customer_name}</strong>
+            <div>Service: {job.service_type}</div>
+            <div>Address: {job.address}</div>
+            <div>Date: {job.service_date}</div>
+            <div>
+              Assigned:{' '}
+              {techs.find((t) => t.id === job.technician_id)?.display_name || 'None'}
+            </div>
+          </div>
+        ))
+      )}
     </div>
   )
-        }
+}
