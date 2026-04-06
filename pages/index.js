@@ -153,6 +153,13 @@ export default function Home() {
 
     const events = result.items || []
 
+    if (events.length === 0) {
+      alert(`Imported 0 events. Check that the event is on your primary calendar and dated tomorrow. Tomorrow filter: ${tomorrow}`)
+      return
+    }
+
+    let importedCount = 0
+
     for (const event of events) {
       const customerNameFromEvent = event.summary || 'Calendar Job'
       const description = event.description || ''
@@ -177,13 +184,13 @@ export default function Home() {
           { onConflict: 'google_event_id' }
         )
 
-      if (error) {
-        console.error('IMPORT ERROR:', error)
+      if (!error) {
+        importedCount++
       }
     }
 
-    fetchJobs()
-    alert(`Imported ${events.length} calendar events for tomorrow`)
+    await fetchJobs()
+    alert(`Imported ${importedCount} of ${events.length} calendar events for ${tomorrow}`)
   }
 
   async function addJob() {
