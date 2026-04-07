@@ -87,7 +87,7 @@ function inferDurationMinutes(job) {
   if (combined.includes("power wash")) return 180;
   if (combined.includes("gutter")) return 180;
   if (combined.includes("carpet")) return 120;
-  if (combined.includes("oven")) return 120);
+  if (combined.includes("oven")) return 120;
 
   return DEFAULT_JOB_DURATION_MINUTES;
 }
