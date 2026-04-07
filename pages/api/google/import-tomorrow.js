@@ -33,12 +33,12 @@ export default async function handler(req, res) {
       auth: oauth2Client,
     });
 
-    const calendarListResponse = await calendar.calendarList.list();
-    const allCalendars = calendarListResponse.data.items || [];
+    const calendarList = await calendar.calendarList.list();
+    const allCalendars = calendarList.data.items || [];
 
     const targetCalendars =
       calendarNames.length > 0
-        ? allCalendars.filter((cal) => calendarNames.includes(cal.summary))
+        ? allCalendars.filter((c) => calendarNames.includes(c.summary))
         : allCalendars;
 
     const timeMin = `${date}T00:00:00-04:00`;
@@ -47,7 +47,7 @@ export default async function handler(req, res) {
     const allEvents = [];
 
     for (const cal of targetCalendars) {
-      const eventsResponse = await calendar.events.list({
+      const eventsRes = await calendar.events.list({
         calendarId: cal.id,
         timeMin,
         timeMax,
@@ -55,9 +55,9 @@ export default async function handler(req, res) {
         orderBy: "startTime",
       });
 
-      const items = eventsResponse.data.items || [];
+      const events = eventsRes.data.items || [];
 
-      for (const event of items) {
+      for (const event of events) {
         allEvents.push({
           id: event.id,
           title: event.summary || "Untitled Job",
@@ -72,26 +72,25 @@ export default async function handler(req, res) {
       }
     }
 
-    const rowsToInsert = allEvents.map((event) => ({
-      id: event.id,
+    const rowsToUpsert = allEvents.map((event) => ({
+      google_event_id: event.id,
       title: event.title,
       address: event.address,
-      start: event.start,
-      end: event.end,
-      date: event.date,
-      source: event.source,
-      calendar_name: event.calendarName,
-      description: event.description,
-      assigned_to: null,
+      arrival_window_start: event.start ? event.start.slice(11, 16) : null,
+      arrival_window_end: event.end ? event.end.slice(11, 16) : null,
+      service_date: event.date,
+      job_source: "GOOGLE",
+      raw_description: event.description || null,
+      event_status: "imported",
     }));
 
     let saved = 0;
     let dbError = null;
 
-    if (rowsToInsert.length > 0) {
+    if (rowsToUpsert.length > 0) {
       const result = await supabase
         .from("jobs")
-        .upsert(rowsToInsert, { onConflict: "id" })
+        .upsert(rowsToUpsert, { onConflict: "google_event_id" })
         .select();
 
       if (result.error) {
@@ -104,7 +103,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       success: true,
       fetched: allEvents.length,
-      imported: rowsToInsert.length,
+      imported: rowsToUpsert.length,
       saved,
       skipped: 0,
       calendarNames: targetCalendars.map((c) => c.summary),
