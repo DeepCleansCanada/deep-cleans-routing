@@ -70,7 +70,7 @@ export default function IndexPage() {
       } catch {
         addLog("Google status returned non-JSON response");
       }
-    } catch (err) {
+    } catch {
       addLog("Failed to check Google status");
     }
   };
@@ -226,8 +226,12 @@ export default function IndexPage() {
     fetchTomorrowJobs();
   }, []);
 
-  const manualJobs = jobs.filter((j) => (j.source || "").toLowerCase() === "manual");
-  const googleJobs = jobs.filter((j) => (j.source || "").toLowerCase() === "google");
+  const manualJobs = jobs.filter(
+    (j) => (j.job_source || "").toLowerCase() === "manual"
+  );
+  const googleJobs = jobs.filter(
+    (j) => (j.job_source || "").toLowerCase() === "google"
+  );
 
   return (
     <div
@@ -452,29 +456,30 @@ export default function IndexPage() {
                         alignItems: "center",
                       }}
                     >
-                      <strong>{job.title || job.customerName || "Untitled Job"}</strong>
+                      <strong>{job.title || job.customer_name || "Untitled Job"}</strong>
                       <span
                         style={{
                           fontSize: 12,
                           padding: "4px 8px",
                           borderRadius: 999,
                           background:
-                            (job.source || "").toLowerCase() === "google"
+                            (job.job_source || "").toLowerCase() === "google"
                               ? "#eef6ff"
                               : "#f3f3f3",
                         }}
                       >
-                        {job.source || "unknown"}
+                        {job.job_source || "unknown"}
                       </span>
                     </div>
 
                     <div style={{ marginTop: 8, fontSize: 14, color: "#555" }}>
-                      <div>Calendar: {job.calendar_name || job.calendarName || "-"}</div>
+                      <div>Service Type: {job.service_type || "-"}</div>
+                      <div>Customer: {job.customer_name || "-"}</div>
                       <div>Address: {job.address || "-"}</div>
-                      <div>Assigned To: {job.assigned_to || job.assignedTo || "-"}</div>
-                      <div>Start: {job.start || "-"}</div>
-                      <div>End: {job.end || "-"}</div>
-                      <div>Date: {job.date || "-"}</div>
+                      <div>Assigned Tech: {job.assigned_technician_id || "-"}</div>
+                      <div>Start: {job.arrival_window_start || "-"}</div>
+                      <div>End: {job.arrival_window_end || "-"}</div>
+                      <div>Date: {job.service_date || "-"}</div>
                     </div>
                   </div>
                 ))}
