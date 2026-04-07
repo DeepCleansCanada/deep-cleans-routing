@@ -1,0 +1,538 @@
+import { supabaseAdmin } from "../../lib/supabaseAdmin";
+
+const DEFAULT_JOB_DURATION_MINUTES = Number(
+  process.env.ROUTING_DEFAULT_JOB_DURATION_MINUTES || 120
+);
+const DEFAULT_SHIFT_START = process.env.ROUTING_DEFAULT_SHIFT_START || "08:00";
+const DEFAULT_SHIFT_END = process.env.ROUTING_DEFAULT_SHIFT_END || "18:00";
+const SAME_AREA_TRAVEL_MINUTES = Number(
+  process.env.ROUTING_SAME_AREA_TRAVEL_MINUTES || 15
+);
+const DEFAULT_TRAVEL_MINUTES = Number(
+  process.env.ROUTING_DEFAULT_TRAVEL_MINUTES || 25
+);
+const FAR_AREA_TRAVEL_MINUTES = Number(
+  process.env.ROUTING_FAR_AREA_TRAVEL_MINUTES || 40
+);
+const MAX_JOBS_PER_TECH = Number(process.env.ROUTING_MAX_JOBS_PER_TECH || 8);
+
+function getTomorrowDateString() {
+  const now = new Date();
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  const year = tomorrow.getFullYear();
+  const month = String(tomorrow.getMonth() + 1).padStart(2, "0");
+  const day = String(tomorrow.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function toDateTime(dateString, value, fallbackTime = "09:00") {
+  if (!value) {
+    return new Date(`${dateString}T${fallbackTime}:00`);
+  }
+
+  if (value instanceof Date) return value;
+
+  const stringValue = String(value).trim();
+
+  if (!stringValue) {
+    return new Date(`${dateString}T${fallbackTime}:00`);
+  }
+
+  if (stringValue.includes("T")) {
+    const parsed = new Date(stringValue);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+
+  const hhmmMatch = stringValue.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (hhmmMatch) {
+    const hours = String(hhmmMatch[1]).padStart(2, "0");
+    const minutes = hhmmMatch[2];
+    return new Date(`${dateString}T${hours}:${minutes}:00`);
+  }
+
+  const fallback = new Date(`${dateString}T${fallbackTime}:00`);
+  return Number.isNaN(fallback.getTime())
+    ? new Date(`${dateString}T09:00:00`)
+    : fallback;
+}
+
+function addMinutes(date, minutes) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+function diffMinutes(a, b) {
+  return Math.round((a.getTime() - b.getTime()) / (60 * 1000));
+}
+
+function formatTime(date) {
+  if (!date || Number.isNaN(date.getTime())) return null;
+  return date.toLocaleTimeString("en-CA", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function normalizeText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s,]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenizeAddress(value) {
+  const cleaned = normalizeText(value)
+    .replace(/\b(unit|suite|ste|apt|apartment|floor|fl|building|bldg)\b/g, " ")
+    .replace(/\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|place|pl|crescent|cres)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) return [];
+
+  const stopWords = new Set([
+    "the",
+    "and",
+    "for",
+    "canada",
+    "ontario",
+    "toronto",
+    "mississauga",
+    "brampton",
+    "burlington",
+    "oakville",
+    "vaughan",
+    "scarborough",
+    "ajax",
+    "pickering",
+    "whitby",
+    "north",
+    "york",
+  ]);
+
+  return cleaned
+    .split(/[,\s]+/)
+    .map((token) => token.trim())
+    .filter((token) => token && token.length > 1 && !stopWords.has(token));
+}
+
+function overlapCount(a, b) {
+  const setA = new Set(tokenizeAddress(a));
+  const setB = new Set(tokenizeAddress(b));
+
+  let count = 0;
+  for (const token of setA) {
+    if (setB.has(token)) count += 1;
+  }
+  return count;
+}
+
+function estimateTravelMinutes(fromAddress, toAddress, techHomeBaseAddress) {
+  const directOverlap = overlapCount(fromAddress, toAddress);
+  if (directOverlap >= 2) return SAME_AREA_TRAVEL_MINUTES;
+  if (directOverlap === 1) return DEFAULT_TRAVEL_MINUTES;
+
+  const homeOverlap = overlapCount(techHomeBaseAddress, toAddress);
+  if (homeOverlap >= 2) return SAME_AREA_TRAVEL_MINUTES;
+  if (homeOverlap === 1) return DEFAULT_TRAVEL_MINUTES;
+
+  return FAR_AREA_TRAVEL_MINUTES;
+}
+
+function inferDurationMinutes(job) {
+  const raw = normalizeText(job?.raw_description);
+  const title = normalizeText(job?.title);
+
+  const explicitMinutes =
+    raw.match(/\b(\d{2,3})\s*(min|mins|minute|minutes)\b/) ||
+    title.match(/\b(\d{2,3})\s*(min|mins|minute|minutes)\b/);
+  if (explicitMinutes) {
+    const value = Number(explicitMinutes[1]);
+    if (value > 0) return value;
+  }
+
+  const explicitHours =
+    raw.match(/\b(\d+(?:\.\d+)?)\s*(hr|hrs|hour|hours)\b/) ||
+    title.match(/\b(\d+(?:\.\d+)?)\s*(hr|hrs|hour|hours)\b/);
+  if (explicitHours) {
+    const value = Number(explicitHours[1]);
+    if (value > 0) return Math.round(value * 60);
+  }
+
+  const combined = `${title} ${raw}`;
+
+  if (combined.includes("bbq")) return 180;
+  if (combined.includes("window")) return 180;
+  if (combined.includes("gutter")) return 180;
+  if (combined.includes("pressure wash")) return 180;
+  if (combined.includes("power wash")) return 180;
+  if (combined.includes("carpet")) return 120;
+  if (combined.includes("upholstery")) return 120;
+  if (combined.includes("oven")) return 150;
+  if (combined.includes("deep clean")) return 240;
+  if (combined.includes("move out")) return 300;
+  if (combined.includes("move-in")) return 300;
+  if (combined.includes("post construction")) return 360;
+
+  return DEFAULT_JOB_DURATION_MINUTES;
+}
+
+function getTechName(tech) {
+  return (
+    tech?.name ||
+    tech?.full_name ||
+    tech?.display_name ||
+    tech?.email ||
+    `Technician ${tech?.id}`
+  );
+}
+
+function getTechHomeBase(tech) {
+  return (
+    tech?.home_base_address ||
+    tech?.home_address ||
+    tech?.base_address ||
+    tech?.address ||
+    ""
+  );
+}
+
+function getTechShiftBounds(serviceDate, tech) {
+  const start =
+    tech?.shift_start ||
+    tech?.start_time ||
+    tech?.availability_start ||
+    DEFAULT_SHIFT_START;
+  const end =
+    tech?.shift_end || tech?.end_time || tech?.availability_end || DEFAULT_SHIFT_END;
+
+  const shiftStart = toDateTime(serviceDate, start, DEFAULT_SHIFT_START);
+  const shiftEnd = toDateTime(serviceDate, end, DEFAULT_SHIFT_END);
+
+  return {
+    shiftStart,
+    shiftEnd,
+  };
+}
+
+function jobWindow(job, serviceDate) {
+  const windowStart = toDateTime(
+    serviceDate,
+    job?.arrival_window_start,
+    DEFAULT_SHIFT_START
+  );
+  const windowEnd = toDateTime(
+    serviceDate,
+    job?.arrival_window_end,
+    DEFAULT_SHIFT_END
+  );
+
+  const normalizedEnd =
+    windowEnd.getTime() < windowStart.getTime()
+      ? addMinutes(windowStart, 120)
+      : windowEnd;
+
+  return {
+    windowStart,
+    windowEnd: normalizedEnd,
+  };
+}
+
+function sortJobsForRouting(a, b, serviceDate) {
+  const aStart = jobWindow(a, serviceDate).windowStart;
+  const bStart = jobWindow(b, serviceDate).windowStart;
+  return aStart.getTime() - bStart.getTime();
+}
+
+function buildTechState(serviceDate, tech, preAssignedJobs) {
+  const { shiftStart, shiftEnd } = getTechShiftBounds(serviceDate, tech);
+  const sortedJobs = [...preAssignedJobs].sort((a, b) =>
+    sortJobsForRouting(a, b, serviceDate)
+  );
+
+  let nextAvailable = shiftStart;
+  let lastAddress = getTechHomeBase(tech);
+
+  const scheduledJobs = sortedJobs.map((job) => {
+    const { windowStart } = jobWindow(job, serviceDate);
+    const travelMinutes = estimateTravelMinutes(
+      lastAddress,
+      job.address,
+      getTechHomeBase(tech)
+    );
+    const durationMinutes = inferDurationMinutes(job);
+    const proposedStart = new Date(
+      Math.max(
+        windowStart.getTime(),
+        addMinutes(nextAvailable, travelMinutes).getTime()
+      )
+    );
+    const proposedEnd = addMinutes(proposedStart, durationMinutes);
+
+    nextAvailable = proposedEnd;
+    lastAddress = job.address || lastAddress;
+
+    return {
+      ...job,
+      planned_start: proposedStart.toISOString(),
+      planned_end: proposedEnd.toISOString(),
+      planned_travel_minutes: travelMinutes,
+      planned_duration_minutes: durationMinutes,
+      locked: true,
+    };
+  });
+
+  return {
+    tech,
+    techId: tech.id,
+    techName: getTechName(tech),
+    homeBaseAddress: getTechHomeBase(tech),
+    shiftStart,
+    shiftEnd,
+    nextAvailable,
+    lastAddress,
+    jobs: scheduledJobs,
+  };
+}
+
+function scoreTechForJob(techState, job, serviceDate) {
+  const { windowStart, windowEnd } = jobWindow(job, serviceDate);
+  const durationMinutes = inferDurationMinutes(job);
+  const travelMinutes = estimateTravelMinutes(
+    techState.lastAddress,
+    job.address,
+    techState.homeBaseAddress
+  );
+
+  const earliestArrival = addMinutes(techState.nextAvailable, travelMinutes);
+  const plannedStart = new Date(
+    Math.max(earliestArrival.getTime(), windowStart.getTime())
+  );
+  const plannedEnd = addMinutes(plannedStart, durationMinutes);
+
+  const lateMinutes = Math.max(0, diffMinutes(plannedStart, windowEnd));
+  const overtimeMinutes = Math.max(0, diffMinutes(plannedEnd, techState.shiftEnd));
+  const underlapMinutes = Math.max(0, diffMinutes(windowStart, earliestArrival));
+
+  const homeOverlap = overlapCount(techState.homeBaseAddress, job.address);
+  const previousOverlap = overlapCount(techState.lastAddress, job.address);
+
+  const localityPenalty =
+    homeOverlap >= 2 || previousOverlap >= 2
+      ? 0
+      : homeOverlap === 1 || previousOverlap === 1
+      ? 8
+      : 20;
+
+  const loadPenalty = techState.jobs.length * 14;
+  const capacityPenalty =
+    techState.jobs.length >= MAX_JOBS_PER_TECH ? 1000 : 0;
+
+  const score =
+    travelMinutes +
+    loadPenalty +
+    capacityPenalty +
+    localityPenalty +
+    lateMinutes * 10 +
+    overtimeMinutes * 10 +
+    Math.floor(underlapMinutes / 20);
+
+  return {
+    score,
+    plannedStart,
+    plannedEnd,
+    travelMinutes,
+    durationMinutes,
+    lateMinutes,
+    overtimeMinutes,
+  };
+}
+
+async function fetchTechnicians() {
+  const { data, error } = await supabaseAdmin
+    .from("technicians")
+    .select("*")
+    .or("is_active.is.null,is_active.eq.true");
+
+  if (error) throw error;
+
+  return (data || []).sort((a, b) =>
+    getTechName(a).localeCompare(getTechName(b))
+  );
+}
+
+async function fetchTomorrowJobs(serviceDate) {
+  const { data, error } = await supabaseAdmin
+    .from("jobs")
+    .select("*")
+    .eq("service_date", serviceDate)
+    .order("arrival_window_start", { ascending: true });
+
+  if (error) throw error;
+
+  return data || [];
+}
+
+async function persistAssignments(assignments) {
+  for (const assignment of assignments) {
+    const { error } = await supabaseAdmin
+      .from("jobs")
+      .update({
+        assigned_technician_id: assignment.assigned_technician_id,
+      })
+      .eq("id", assignment.id);
+
+    if (error) throw error;
+  }
+}
+
+export default async function handler(req, res) {
+  if (req.method !== "POST" && req.method !== "GET") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  const dryRun =
+    String(req.query?.dryRun || req.body?.dryRun || "").toLowerCase() === "true";
+  const requestedDate =
+    req.body?.service_date || req.query?.service_date || getTomorrowDateString();
+
+  try {
+    const [jobs, technicians] = await Promise.all([
+      fetchTomorrowJobs(requestedDate),
+      fetchTechnicians(),
+    ]);
+
+    if (!technicians.length) {
+      return res.status(400).json({
+        success: false,
+        error: "No active technicians found in technicians table",
+        service_date: requestedDate,
+      });
+    }
+
+    if (!jobs.length) {
+      return res.status(200).json({
+        success: true,
+        message: "No jobs found for routing date",
+        service_date: requestedDate,
+        technicians: technicians.map((tech) => ({
+          id: tech.id,
+          name: getTechName(tech),
+        })),
+        assignments: [],
+      });
+    }
+
+    const preAssignedJobs = jobs.filter((job) => job.assigned_technician_id);
+    const unassignedJobs = jobs.filter((job) => !job.assigned_technician_id);
+
+    const techStates = technicians.map((tech) =>
+      buildTechState(
+        requestedDate,
+        tech,
+        preAssignedJobs.filter(
+          (job) => String(job.assigned_technician_id) === String(tech.id)
+        )
+      )
+    );
+
+    const newlyAssigned = [];
+
+    for (const job of [...unassignedJobs].sort((a, b) =>
+      sortJobsForRouting(a, b, requestedDate)
+    )) {
+      let bestOption = null;
+
+      for (const techState of techStates) {
+        const scored = scoreTechForJob(techState, job, requestedDate);
+
+        if (!bestOption || scored.score < bestOption.score) {
+          bestOption = {
+            ...scored,
+            techState,
+          };
+        }
+      }
+
+      if (!bestOption) continue;
+
+      const { techState, plannedStart, plannedEnd, travelMinutes, durationMinutes } =
+        bestOption;
+
+      techState.jobs.push({
+        ...job,
+        planned_start: plannedStart.toISOString(),
+        planned_end: plannedEnd.toISOString(),
+        planned_travel_minutes: travelMinutes,
+        planned_duration_minutes: durationMinutes,
+        locked: false,
+      });
+      techState.nextAvailable = plannedEnd;
+      techState.lastAddress = job.address || techState.lastAddress;
+
+      newlyAssigned.push({
+        id: job.id,
+        assigned_technician_id: techState.techId,
+        technician_name: techState.techName,
+        title: job.title,
+        address: job.address,
+        planned_start: plannedStart.toISOString(),
+        planned_end: plannedEnd.toISOString(),
+        planned_travel_minutes: travelMinutes,
+        planned_duration_minutes: durationMinutes,
+      });
+    }
+
+    if (!dryRun && newlyAssigned.length) {
+      await persistAssignments(newlyAssigned);
+    }
+
+    const responseTechs = techStates.map((state) => ({
+      id: state.techId,
+      name: state.techName,
+      shift_start: state.shiftStart.toISOString(),
+      shift_end: state.shiftEnd.toISOString(),
+      jobs: state.jobs
+        .slice()
+        .sort(
+          (a, b) =>
+            new Date(a.planned_start || 0).getTime() -
+            new Date(b.planned_start || 0).getTime()
+        )
+        .map((job) => ({
+          id: job.id,
+          title: job.title,
+          address: job.address,
+          assigned_technician_id: job.assigned_technician_id || state.techId,
+          planned_start: job.planned_start,
+          planned_end: job.planned_end,
+          planned_start_display: formatTime(new Date(job.planned_start)),
+          planned_end_display: formatTime(new Date(job.planned_end)),
+          planned_travel_minutes: job.planned_travel_minutes,
+          planned_duration_minutes: job.planned_duration_minutes,
+          locked: Boolean(job.locked),
+        })),
+    }));
+
+    return res.status(200).json({
+      success: true,
+      dryRun,
+      service_date: requestedDate,
+      totals: {
+        technicians: technicians.length,
+        jobs: jobs.length,
+        pre_assigned_jobs: preAssignedJobs.length,
+        newly_assigned_jobs: newlyAssigned.length,
+        still_unassigned_jobs: Math.max(0, jobs.length - preAssignedJobs.length - newlyAssigned.length),
+      },
+      assignments: newlyAssigned,
+      technicians: responseTechs,
+    });
+  } catch (error) {
+    console.error("route-tomorrow error", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Unexpected routing error",
+    });
+  }
+}
