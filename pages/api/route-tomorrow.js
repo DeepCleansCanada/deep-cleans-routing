@@ -69,7 +69,7 @@ function overlapScore(a, b) {
 }
 
 function inferDurationMinutes(job) {
-  const combined = normalizeText(`${job.title || ""} ${job.raw_description || ""}`);
+  const combined = normalizeText(`${job?.title || ""} ${job?.raw_description || ""}`);
 
   const minutesMatch = combined.match(/\b(\d{2,3})\s*(min|mins|minute|minutes)\b/);
   if (minutesMatch) return Number(minutesMatch[1]);
@@ -138,11 +138,13 @@ function buildTechStates(techs, serviceDate) {
 }
 
 function sortJobsForPlanning(jobs, serviceDate) {
-  return [...jobs].sort((a, b) => {
-    const aStart = parseTimeOnDate(serviceDate, a.arrival_window_start, "09:00").getTime();
-    const bStart = parseTimeOnDate(serviceDate, b.arrival_window_start, "09:00").getTime();
-    return aStart - bStart;
-  });
+  return [...jobs]
+    .filter((job) => job?.address && job?.arrival_window_start)
+    .sort((a, b) => {
+      const aStart = parseTimeOnDate(serviceDate, a.arrival_window_start, "09:00").getTime();
+      const bStart = parseTimeOnDate(serviceDate, b.arrival_window_start, "09:00").getTime();
+      return aStart - bStart;
+    });
 }
 
 function chooseBestTech(job, techStates, serviceDate) {
@@ -153,7 +155,7 @@ function chooseBestTech(job, techStates, serviceDate) {
   );
   const windowEnd = parseTimeOnDate(
     serviceDate,
-    job.arrival_window_end,
+    job.arrival_window_end || job.arrival_window_start,
     "17:00"
   );
   const durationMinutes = inferDurationMinutes(job);
@@ -166,12 +168,15 @@ function chooseBestTech(job, techStates, serviceDate) {
         ? state.route[state.route.length - 1].address
         : state.homeAddress;
 
-    const anchorScore = overlapScore(job.address, state.clusterAnchor);
-    const routeScore = overlapScore(job.address, lastStopAddress);
-    const homeScore = overlapScore(job.address, state.homeAddress);
+    const anchorScore = overlapScore(job.address || "", state.clusterAnchor || "");
+    const routeScore = overlapScore(job.address || "", lastStopAddress || "");
+    const homeScore = overlapScore(job.address || "", state.homeAddress || "");
 
     const proximityScore = anchorScore * 6 + routeScore * 4 + homeScore * 3;
-    const travelPenalty = Math.max(0, DEFAULT_TRAVEL_MINUTES - routeScore * 3 - anchorScore * 2);
+    const travelPenalty = Math.max(
+      0,
+      DEFAULT_TRAVEL_MINUTES - routeScore * 3 - anchorScore * 2
+    );
 
     const earliestStart = new Date(
       Math.max(state.nextAvailable.getTime(), windowStart.getTime())
@@ -203,6 +208,10 @@ function planRoutes(jobs, techs, serviceDate) {
   const assignments = [];
 
   for (const job of orderedJobs) {
+    if (!job?.address || !job?.arrival_window_start) {
+      continue;
+    }
+
     if (job.assigned_technician_id) {
       const existingTech = techStates.find(
         (state) => String(state.techId) === String(job.assigned_technician_id)
@@ -240,6 +249,8 @@ function planRoutes(jobs, techs, serviceDate) {
     }
 
     const best = chooseBestTech(job, techStates, serviceDate);
+    if (!best) continue;
+
     const plannedStart = best.plannedStart;
     const plannedEnd = addMinutes(plannedStart, best.durationMinutes);
 
