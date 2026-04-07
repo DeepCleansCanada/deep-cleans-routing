@@ -1,5 +1,5 @@
-const { google } = require("googleapis");
-const { createClient } = require("@supabase/supabase-js");
+import { google } from "googleapis";
+import { createClient } from "@supabase/supabase-js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -28,7 +28,10 @@ export default async function handler(req, res) {
       refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
     });
 
-    const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+    const calendar = google.calendar({
+      version: "v3",
+      auth: oauth2Client,
+    });
 
     const calendarListResponse = await calendar.calendarList.list();
     const allCalendars = calendarListResponse.data.items || [];
