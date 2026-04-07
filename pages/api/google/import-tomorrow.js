@@ -79,9 +79,7 @@ export default async function handler(req, res) {
       arrival_window_start: event.start ? event.start.slice(11, 16) : null,
       arrival_window_end: event.end ? event.end.slice(11, 16) : null,
       service_date: event.date,
-      job_source: "google",
       raw_description: event.description || null,
-      event_status: "imported",
     }));
 
     let saved = 0;
