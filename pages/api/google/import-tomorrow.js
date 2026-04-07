@@ -1,5 +1,5 @@
 import { google } from "googleapis";
-import { supabase } from "../../../lib/supabase";
+import { createClient } from "@supabase/supabase-js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -12,6 +12,11 @@ export default async function handler(req, res) {
     if (!date) {
       return res.status(400).json({ error: "Missing date" });
     }
+
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    );
 
     const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
@@ -77,7 +82,7 @@ export default async function handler(req, res) {
       assigned_to: null,
     }));
 
-    let dbResult = null;
+    let saved = 0;
     let dbError = null;
 
     if (rowsToInsert.length > 0) {
@@ -86,22 +91,25 @@ export default async function handler(req, res) {
         .upsert(rowsToInsert, { onConflict: "id" })
         .select();
 
-      dbResult = result.data;
-      dbError = result.error;
+      if (result.error) {
+        dbError = result.error.message;
+      } else {
+        saved = Array.isArray(result.data) ? result.data.length : 0;
+      }
     }
 
     return res.status(200).json({
       success: true,
       fetched: allEvents.length,
       imported: rowsToInsert.length,
-      saved: dbResult ? dbResult.length : 0,
+      saved,
       skipped: 0,
       calendarNames: targetCalendars.map((c) => c.summary),
       timeMin,
       timeMax,
       samples: allEvents.slice(0, 5),
       events: allEvents,
-      dbError: dbError ? dbError.message : null,
+      dbError,
     });
   } catch (error) {
     console.error("import-tomorrow error:", error);
