@@ -2,7 +2,7 @@ import { google } from "googleapis";
 
 export default async function handler(req, res) {
   try {
-    const code = req.query.code;
+    const { code } = req.query;
 
     if (!code) {
       return res.status(400).send("Missing code");
@@ -17,18 +17,12 @@ export default async function handler(req, res) {
     const { tokens } = await oauth2Client.getToken(code);
 
     return res.status(200).send(`
-      <html>
-        <body style="font-family: Arial, sans-serif; padding: 24px;">
-          <h1>Google token received</h1>
-          <p>Copy this refresh token into Vercel as <strong>GOOGLE_REFRESH_TOKEN</strong>:</p>
-          <pre style="white-space: pre-wrap; word-break: break-word; background: #f4f4f4; padding: 12px; border-radius: 8px;">${tokens.refresh_token || "NO_REFRESH_TOKEN_RETURNED"}</pre>
-        </body>
-      </html>
+      <h1>Google token received</h1>
+      <p>Copy this refresh token into Vercel as <b>GOOGLE_REFRESH_TOKEN</b>:</p>
+      <pre>${tokens.refresh_token}</pre>
     `);
   } catch (error) {
     console.error("callback error:", error);
-    return res.status(500).send(
-      `<pre style="white-space: pre-wrap;">${error.message || "Callback failed"}</pre>`
-    );
+    return res.status(500).send("OAuth failed");
   }
 }
