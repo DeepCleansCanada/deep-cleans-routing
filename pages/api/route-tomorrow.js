@@ -10,7 +10,6 @@ export default async function handler(req, res) {
   try {
     const tomorrow = getTomorrowDate();
 
-    // 1. Get jobs
     const { data: jobs, error: jobsError } = await supabaseAdmin
       .from("jobs")
       .select("*")
@@ -18,54 +17,73 @@ export default async function handler(req, res) {
 
     if (jobsError) throw jobsError;
 
-    // 2. Get technicians (USING YOUR REAL COLUMNS)
     const { data: techs, error: techError } = await supabaseAdmin
       .from("technicians")
       .select("*")
-      .eq("is_active", true);
+      .eq("is_active", true)
+      .order("rank_position", { ascending: true, nullsFirst: false });
 
     if (techError) throw techError;
 
-    if (!techs.length) {
+    if (!techs || !techs.length) {
       return res.status(400).json({
         success: false,
-        message: "No technicians found",
+        message: "No active technicians found",
       });
     }
 
-    // 3. Simple assignment logic (we’ll upgrade later)
-    let assignments = [];
+    const assignments = [];
 
     for (let i = 0; i < jobs.length; i++) {
       const job = jobs[i];
-      const tech = techs[i % techs.length]; // round-robin for now
 
-      assignments.push({
-        job_id: job.id,
-        tech_id: tech.id,
-        tech_name: tech.display_name || `${tech.first_name} ${tech.last_name}`,
-        address: job.address,
-      });
+      if (job.assigned_technician_id) {
+        assignments.push({
+          job_id: job.id,
+          tech_id: job.assigned_technician_id,
+          tech_name: "Already assigned",
+          address: job.address,
+          skipped: true,
+        });
+        continue;
+      }
 
-      // update DB
-      await supabaseAdmin
+      const tech = techs[i % techs.length];
+      const techName =
+        tech.display_name ||
+        [tech.first_name, tech.last_name].filter(Boolean).join(" ") ||
+        tech.email ||
+        `Tech ${tech.id}`;
+
+      const { error: updateError } = await supabaseAdmin
         .from("jobs")
         .update({
           assigned_technician_id: tech.id,
         })
         .eq("id", job.id);
+
+      if (updateError) throw updateError;
+
+      assignments.push({
+        job_id: job.id,
+        tech_id: tech.id,
+        tech_name: techName,
+        address: job.address,
+      });
     }
 
     return res.status(200).json({
       success: true,
       total_jobs: jobs.length,
+      total_technicians: techs.length,
       assignments,
     });
   } catch (err) {
-    console.error(err);
+    console.error("route-tomorrow error:", err);
+
     return res.status(500).json({
       success: false,
-      error: err.message,
+      error: err.message || "Unknown server error",
     });
   }
 }
