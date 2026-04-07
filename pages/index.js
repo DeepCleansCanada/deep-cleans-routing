@@ -1,49 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
 
-type Job = {
-  id: string;
-  title?: string;
-  customerName?: string;
-  address?: string;
-  assignedTo?: string;
-  start?: string;
-  end?: string;
-  source?: "manual" | "google" | string;
-  date?: string;
-  calendarName?: string;
-};
-
-type GoogleStatusResponse = {
-  connected?: boolean;
-  email?: string;
-  calendarId?: string;
-  error?: string;
-};
-
-type ImportTomorrowResponse = {
-  success?: boolean;
-  connected?: boolean;
-  fetched?: number;
-  imported?: number;
-  skipped?: number;
-  calendarId?: string;
-  calendarIds?: string[];
-  calendarNames?: string[];
-  timeMin?: string;
-  timeMax?: string;
-  samples?: any[];
-  reason?: string;
-  error?: string;
-};
-
-type RouteTomorrowResponse = {
-  success?: boolean;
-  routedCount?: number;
-  jobs?: Job[];
-  routes?: any[];
-  error?: string;
-};
-
 function getTorontoTomorrowLabel() {
   const now = new Date();
   const formatter = new Intl.DateTimeFormat("en-CA", {
@@ -81,20 +37,19 @@ export default function IndexPage() {
     "Windows/Eaves",
   ];
 
-  const [jobs, setJobs] = useState<Job[]>([]);
+  const [jobs, setJobs] = useState([]);
   const [loadingJobs, setLoadingJobs] = useState(false);
   const [routingTomorrow, setRoutingTomorrow] = useState(false);
-  const [googleStatus, setGoogleStatus] = useState<GoogleStatusResponse | null>(null);
-  const [debugLog, setDebugLog] = useState<string[]>([]);
-  const [lastImportResult, setLastImportResult] = useState<ImportTomorrowResponse | null>(null);
-  const [lastRouteResult, setLastRouteResult] = useState<RouteTomorrowResponse | null>(null);
-  const [error, setError] = useState<string>("");
+  const [googleStatus, setGoogleStatus] = useState(null);
+  const [debugLog, setDebugLog] = useState([]);
+  const [lastImportResult, setLastImportResult] = useState(null);
+  const [lastRouteResult, setLastRouteResult] = useState(null);
+  const [error, setError] = useState("");
 
-  const addLog = (message: string) => {
-    setDebugLog((prev) => [
-      `${new Date().toLocaleTimeString()}: ${message}`,
-      ...prev,
-    ].slice(0, 60));
+  const addLog = (message) => {
+    setDebugLog((prev) =>
+      [`${new Date().toLocaleTimeString()}: ${message}`, ...prev].slice(0, 60)
+    );
   };
 
   const fetchGoogleStatus = async () => {
@@ -153,7 +108,7 @@ export default function IndexPage() {
         }),
       });
 
-      const data: ImportTomorrowResponse = await res.json();
+      const data = await res.json();
       setLastImportResult(data);
 
       if (!res.ok || data?.error) {
@@ -177,7 +132,7 @@ export default function IndexPage() {
       }
 
       return data;
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
       const msg = err?.message || "Google import failed";
       setError(msg);
@@ -213,7 +168,7 @@ export default function IndexPage() {
         }),
       });
 
-      const data: RouteTomorrowResponse = await res.json();
+      const data = await res.json();
       setLastRouteResult(data);
 
       if (!res.ok || data?.error) {
@@ -223,7 +178,7 @@ export default function IndexPage() {
       addLog(`Routing finished. routedCount=${data?.routedCount ?? 0}`);
 
       await fetchTomorrowJobs();
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
       const msg = err?.message || "Failed to route tomorrow";
       setError(msg);
