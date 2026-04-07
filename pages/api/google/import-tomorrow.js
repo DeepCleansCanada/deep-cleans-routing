@@ -1,4 +1,5 @@
 import { google } from "googleapis";
+import { supabase } from "../../../lib/supabase";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -58,20 +59,49 @@ export default async function handler(req, res) {
           description: event.description || "",
           calendarName: cal.summary,
           source: "google",
+          date,
         });
       }
+    }
+
+    const rowsToInsert = allEvents.map((event) => ({
+      id: event.id,
+      title: event.title,
+      address: event.address,
+      start: event.start,
+      end: event.end,
+      date: event.date,
+      source: event.source,
+      calendar_name: event.calendarName,
+      description: event.description,
+      assigned_to: null,
+    }));
+
+    let dbResult = null;
+    let dbError = null;
+
+    if (rowsToInsert.length > 0) {
+      const result = await supabase
+        .from("jobs")
+        .upsert(rowsToInsert, { onConflict: "id" })
+        .select();
+
+      dbResult = result.data;
+      dbError = result.error;
     }
 
     return res.status(200).json({
       success: true,
       fetched: allEvents.length,
-      imported: allEvents.length,
+      imported: rowsToInsert.length,
+      saved: dbResult ? dbResult.length : 0,
       skipped: 0,
       calendarNames: targetCalendars.map((c) => c.summary),
       timeMin,
       timeMax,
       samples: allEvents.slice(0, 5),
       events: allEvents,
+      dbError: dbError ? dbError.message : null,
     });
   } catch (error) {
     console.error("import-tomorrow error:", error);
