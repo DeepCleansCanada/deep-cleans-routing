@@ -7,24 +7,21 @@ export default async function handler(req, res) {
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
     );
 
-    const { date } = req.query;
-
-    let query = supabase.from("jobs").select("*");
-
-    if (date) {
-      query = query.eq("date", date);
-    }
-
-    const { data, error } = await query.order("date", { ascending: true });
+    const { data, error } = await supabase.from("jobs").select("*");
 
     if (error) {
       console.error("Supabase error:", error);
       return res.status(500).json({ error: error.message });
     }
 
-    return res.status(200).json({ jobs: data || [] });
+    return res.status(200).json({
+      success: true,
+      jobs: data || [],
+    });
   } catch (err) {
     console.error("Jobs API error:", err);
-    return res.status(500).json({ error: err.message || "Failed to fetch jobs" });
+    return res.status(500).json({
+      error: err.message || "Failed to fetch jobs",
+    });
   }
 }
