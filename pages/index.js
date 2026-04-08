@@ -7,36 +7,47 @@ function getTomorrowDate() {
   return d.toISOString().split("T")[0];
 }
 
-function formatTime(value) {
+function safeTime(value) {
   if (!value) return "-";
+  if (typeof value === "string" && !value.includes("T")) return value;
   const dt = new Date(value);
-  if (Number.isNaN(dt.getTime())) return value;
+  if (Number.isNaN(dt.getTime())) return String(value);
   return dt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
-function getTechDisplayName(tech) {
+function safeJson(value, fallback = "No data yet.") {
+  try {
+    if (value == null) return fallback;
+    return JSON.stringify(value, null, 2);
+  } catch (err) {
+    return fallback;
+  }
+}
+
+function techNameFromRow(tech) {
   if (!tech) return "-";
   return (
     tech.display_name ||
     [tech.first_name, tech.last_name].filter(Boolean).join(" ") ||
     tech.legal_name ||
     tech.email ||
-    tech.id
+    tech.id ||
+    "-"
   );
 }
 
 export default function Home() {
+  const tomorrow = useMemo(() => getTomorrowDate(), []);
+
   const [jobs, setJobs] = useState([]);
   const [technicians, setTechnicians] = useState([]);
   const [routes, setRoutes] = useState([]);
-  const [lastRouteResult, setLastRouteResult] = useState(null);
   const [lastImportResult, setLastImportResult] = useState(null);
+  const [lastRouteResult, setLastRouteResult] = useState(null);
+  const [errorMessage, setErrorMessage] = useState("");
   const [loadingJobs, setLoadingJobs] = useState(false);
   const [loadingImport, setLoadingImport] = useState(false);
   const [loadingRoute, setLoadingRoute] = useState(false);
-  const [errorMessage, setErrorMessage] = useState("");
-
-  const tomorrow = useMemo(() => getTomorrowDate(), []);
 
   useEffect(() => {
     loadDashboard();
@@ -49,6 +60,8 @@ export default function Home() {
   async function fetchJobs() {
     try {
       setLoadingJobs(true);
+      setErrorMessage("");
+
       const { data, error } = await supabase
         .from("jobs")
         .select("*")
@@ -56,9 +69,10 @@ export default function Home() {
         .order("arrival_window_start", { ascending: true });
 
       if (error) throw error;
-      setJobs(data || []);
+      setJobs(Array.isArray(data) ? data : []);
     } catch (error) {
       setErrorMessage(error.message || "Failed to load jobs");
+      setJobs([]);
     } finally {
       setLoadingJobs(false);
     }
@@ -69,23 +83,21 @@ export default function Home() {
       const { data, error } = await supabase
         .from("technicians")
         .select("*")
-        .eq("is_active", true)
-        .order("rank_position", { ascending: true, nullsFirst: false });
+        .eq("is_active", true);
 
       if (error) throw error;
-      setTechnicians(data || []);
+      setTechnicians(Array.isArray(data) ? data : []);
     } catch (error) {
-      setErrorMessage(error.message || "Failed to load technicians");
+      setTechnicians([]);
     }
   }
 
-  function resolveTechnicianName(technicianId) {
-    if (!technicianId) return "-";
-
-    const tech = technicians.find((t) => String(t.id) === String(technicianId));
-    if (!tech) return technicianId;
-
-    return getTechDisplayName(tech);
+  function resolveTechName(assignedTechnicianId) {
+    if (!assignedTechnicianId) return "-";
+    const tech = technicians.find(
+      (t) => String(t.id) === String(assignedTechnicianId)
+    );
+    return tech ? techNameFromRow(tech) : String(assignedTechnicianId);
   }
 
   async function handleImportTomorrow() {
@@ -140,7 +152,7 @@ export default function Home() {
       }
 
       setLastRouteResult(json);
-      setRoutes(json.routes || []);
+      setRoutes(Array.isArray(json.routes) ? json.routes : []);
       await fetchJobs();
     } catch (error) {
       setLastRouteResult({
@@ -154,13 +166,16 @@ export default function Home() {
     }
   }
 
-  const totalJobs = jobs.length;
-  const googleJobs = jobs.filter(
-    (job) => String(job.job_source || "").toLowerCase() === "google"
-  ).length;
+  const totalJobs = Array.isArray(jobs) ? jobs.length : 0;
+  const googleJobs = Array.isArray(jobs)
+    ? jobs.filter(
+        (job) => String(job?.job_source || "").toLowerCase() === "google"
+      ).length
+    : 0;
   const manualJobs = totalJobs - googleJobs;
-
-  const calendarNames = lastImportResult?.calendarNames || [];
+  const calendarNames = Array.isArray(lastImportResult?.calendarNames)
+    ? lastImportResult.calendarNames
+    : [];
 
   return (
     <div
@@ -262,7 +277,7 @@ export default function Home() {
           </button>
         </div>
 
-        {errorMessage && (
+        {errorMessage ? (
           <div
             style={{
               marginTop: 16,
@@ -276,7 +291,7 @@ export default function Home() {
           >
             {errorMessage}
           </div>
-        )}
+        ) : null}
       </div>
 
       <div
@@ -372,16 +387,14 @@ export default function Home() {
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {job.job_source || "unknown"}
+                      {job.service_type || job.job_source || "unknown"}
                     </div>
                   </div>
 
                   <div>Service Type: {job.service_type || "-"}</div>
                   <div>Customer: {job.customer_name || "-"}</div>
                   <div>Address: {job.address || "-"}</div>
-                  <div>
-                    Assigned Tech: {resolveTechnicianName(job.assigned_technician_id)}
-                  </div>
+                  <div>Assigned Tech: {resolveTechName(job.assigned_technician_id)}</div>
                   <div>Start: {job.arrival_window_start || "-"}</div>
                   <div>End: {job.arrival_window_end || "-"}</div>
                   <div>Date: {job.service_date || "-"}</div>
@@ -414,16 +427,16 @@ export default function Home() {
                   }}
                 >
                   <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>
-                    {route.tech_name}
+                    {route.tech_name || "-"}
                   </div>
                   <div style={{ color: "#666", marginBottom: 12 }}>
                     Home Base: {route.home_address || "-"}
                   </div>
 
-                  {route.stops && route.stops.length > 0 ? (
+                  {Array.isArray(route.stops) && route.stops.length > 0 ? (
                     route.stops.map((stop, index) => (
                       <div
-                        key={`${route.tech_id}-${stop.jobId}-${index}`}
+                        key={`${route.tech_id}-${stop.jobId || index}`}
                         style={{
                           borderTop: index === 0 ? "none" : "1px solid #edf0f5",
                           paddingTop: index === 0 ? 0 : 10,
@@ -431,11 +444,11 @@ export default function Home() {
                         }}
                       >
                         <div style={{ fontWeight: 600 }}>
-                          {index + 1}. {stop.title}
+                          {index + 1}. {stop.title || "Untitled stop"}
                         </div>
-                        <div>{stop.address}</div>
+                        <div>{stop.address || "-"}</div>
                         <div style={{ color: "#555" }}>
-                          {formatTime(stop.plannedStart)} - {formatTime(stop.plannedEnd)}
+                          {safeTime(stop.plannedStart)} - {safeTime(stop.plannedEnd)}
                         </div>
                       </div>
                     ))
@@ -467,9 +480,7 @@ export default function Home() {
                 lineHeight: 1.45,
               }}
             >
-              {lastImportResult
-                ? JSON.stringify(lastImportResult, null, 2)
-                : "No import run yet."}
+              {safeJson(lastImportResult, "No import run yet.")}
             </pre>
           </div>
 
@@ -491,9 +502,7 @@ export default function Home() {
                 lineHeight: 1.45,
               }}
             >
-              {lastRouteResult
-                ? JSON.stringify(lastRouteResult, null, 2)
-                : "No routing run yet."}
+              {safeJson(lastRouteResult, "No routing run yet.")}
             </pre>
           </div>
         </div>
