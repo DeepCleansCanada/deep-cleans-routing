@@ -737,8 +737,13 @@ export default async function handler(req, res) {
     const gmailApi = google.gmail({ version: "v1", auth });
     const calendars = await listTargetCalendars(calendarApi);
 
-    const profileResponse = await gmailApi.users.getProfile({ userId: "me" });
-    const senderEmail = profileResponse.data.emailAddress || "me";
+    const senderEmail =
+      process.env.GOOGLE_SENDER_EMAIL ||
+      process.env.GMAIL_SENDER_EMAIL;
+
+    if (!senderEmail) {
+      throw new Error("Missing GOOGLE_SENDER_EMAIL");
+    }
 
     const calendarIdByName = new Map(
       calendars.map((cal) => [String(cal.summary || "").trim(), cal.id])
