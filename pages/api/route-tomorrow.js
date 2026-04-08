@@ -533,6 +533,150 @@ async function syncTechnicianGuestToGoogleEvent({
   };
 }
 
+function formatTime12h(timeValue) {
+  if (!timeValue) return "-";
+
+  const raw = String(timeValue).trim();
+
+  if (raw.includes("T")) {
+    const dt = new Date(raw);
+    if (!Number.isNaN(dt.getTime())) {
+      return new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/Toronto",
+        hour: "numeric",
+        minute: "2-digit",
+      }).format(dt);
+    }
+  }
+
+  const match = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (!match) return raw;
+
+  const hour = Number(match[1]);
+  const minute = match[2];
+  const suffix = hour >= 12 ? "PM" : "AM";
+  const hour12 = hour % 12 || 12;
+
+  return `${hour12}:${minute} ${suffix}`;
+}
+
+function buildGoogleMapsLinkForRoute(route) {
+  if (!route || !Array.isArray(route.stops) || route.stops.length === 0) return "";
+
+  const addresses = [];
+
+  if (route.home_address) {
+    addresses.push(route.home_address);
+  }
+
+  for (const stop of route.stops) {
+    if (stop.address) addresses.push(stop.address);
+  }
+
+  const cleaned = addresses
+    .map((a) => String(a || "").trim())
+    .filter(Boolean);
+
+  if (cleaned.length < 2) return "";
+
+  const origin = encodeURIComponent(cleaned[0]);
+  const destination = encodeURIComponent(cleaned[cleaned.length - 1]);
+  const waypoints = cleaned.slice(1, -1).map(encodeURIComponent).join("|");
+
+  let url = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&travelmode=driving`;
+
+  if (waypoints) {
+    url += `&waypoints=${waypoints}`;
+  }
+
+  return url;
+}
+
+function escapeHeader(value) {
+  return String(value || "").replace(/[\r\n]+/g, " ").trim();
+}
+
+function buildRouteEmailBody({ serviceDate, route }) {
+  const techName = route.tech_name || "Technician";
+  const mapsLink = buildGoogleMapsLinkForRoute(route);
+
+  const lines = [];
+  lines.push(`Hi ${techName},`);
+  lines.push("");
+  lines.push(`Here is your route for ${serviceDate}:`);
+  lines.push("");
+
+  if (!route.stops || route.stops.length === 0) {
+    lines.push("No jobs assigned.");
+  } else {
+    route.stops.forEach((stop, index) => {
+      lines.push(`${index + 1}. ${formatTime12h(stop.plannedStart)} - ${stop.title || "Job"}`);
+      lines.push(`   Service: ${normalizeServiceKey(stop.service_type)}`);
+      lines.push(`   Address: ${stop.address || "-"}`);
+      lines.push("");
+    });
+  }
+
+  if (mapsLink) {
+    lines.push("Google Maps route:");
+    lines.push(mapsLink);
+    lines.push("");
+  }
+
+  lines.push("Please reply if anything looks off.");
+  lines.push("");
+  lines.push("Deep Cleans Routing");
+
+  return lines.join("\n");
+}
+
+function buildRawEmail({ from, to, subject, body }) {
+  const message = [
+    `From: ${escapeHeader(from)}`,
+    `To: ${escapeHeader(to)}`,
+    `Subject: ${escapeHeader(subject)}`,
+    "MIME-Version: 1.0",
+    'Content-Type: text/plain; charset="UTF-8"',
+    "",
+    body,
+  ].join("\r\n");
+
+  return Buffer.from(message)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+async function sendRouteEmail({ gmailApi, fromEmail, route, serviceDate }) {
+  if (!route?.tech_email) {
+    return { success: false, reason: "Missing technician email" };
+  }
+
+  const subject = `Your Route for ${serviceDate}`;
+  const body = buildRouteEmailBody({ serviceDate, route });
+  const raw = buildRawEmail({
+    from: fromEmail,
+    to: route.tech_email,
+    subject,
+    body,
+  });
+
+  await gmailApi.users.messages.send({
+    userId: "me",
+    requestBody: {
+      raw,
+    },
+  });
+
+  return {
+    success: true,
+    tech_name: route.tech_name,
+    tech_email: route.tech_email,
+    subject,
+  };
+}
+
 export default async function handler(req, res) {
   try {
     const serviceDate =
@@ -590,7 +734,11 @@ export default async function handler(req, res) {
 
     const auth = buildOAuthClient();
     const calendarApi = google.calendar({ version: "v3", auth });
+    const gmailApi = google.gmail({ version: "v1", auth });
     const calendars = await listTargetCalendars(calendarApi);
+
+    const profileResponse = await gmailApi.users.getProfile({ userId: "me" });
+    const senderEmail = profileResponse.data.emailAddress || "me";
 
     const calendarIdByName = new Map(
       calendars.map((cal) => [String(cal.summary || "").trim(), cal.id])
@@ -650,6 +798,32 @@ export default async function handler(req, res) {
       }
     }
 
+    const emailResults = [];
+
+    for (const route of routes) {
+      if (!route.tech_email || !route.stops || route.stops.length === 0) {
+        continue;
+      }
+
+      try {
+        const result = await sendRouteEmail({
+          gmailApi,
+          fromEmail: senderEmail,
+          route,
+          serviceDate,
+        });
+
+        emailResults.push(result);
+      } catch (emailError) {
+        emailResults.push({
+          success: false,
+          tech_name: route.tech_name,
+          tech_email: route.tech_email || null,
+          reason: emailError.message || "Failed to send route email",
+        });
+      }
+    }
+
     return res.status(200).json({
       success: true,
       service_date: serviceDate,
@@ -663,6 +837,8 @@ export default async function handler(req, res) {
       unassigned_jobs: unassignedJobs,
       routes,
       google_invite_results: inviteResults,
+      route_email_results: emailResults,
+      route_email_sender: senderEmail,
     });
   } catch (err) {
     console.error("route-tomorrow error:", err);
