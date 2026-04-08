@@ -1,6 +1,16 @@
+import { google } from "googleapis";
 import { supabaseAdmin } from "../../lib/supabaseAdmin";
 
 const DEFAULT_TRAVEL_BUFFER_MINUTES = 25;
+const TARGET_CALENDAR_NAMES = [
+  "Jiffy Lawn Bookings",
+  "Internal Booking",
+  "Windows/Eaves",
+  "Carpet Cleaning Bookings",
+  "Residential Deep Clean Bookings",
+  "BBQ Bookings",
+  "Power Washing",
+];
 
 function getTomorrowDateToronto() {
   const now = new Date();
@@ -38,10 +48,10 @@ function normalizeServiceKey(value) {
   const service = normalizeText(value);
 
   if (!service) return "general";
-
   if (service === "bbq" || service.includes("bbq")) return "bbq";
   if (service === "oven" || service.includes("oven") || service.includes("stove")) return "oven";
   if (service === "carpet" || service.includes("carpet")) return "carpet";
+
   if (
     service === "windows" ||
     service === "window" ||
@@ -50,7 +60,9 @@ function normalizeServiceKey(value) {
   ) {
     return "windows";
   }
+
   if (service === "gutter" || service.includes("gutter")) return "gutter";
+
   if (
     service === "pressure-washing" ||
     service === "pressure washing" ||
@@ -60,6 +72,7 @@ function normalizeServiceKey(value) {
   ) {
     return "pressure-washing";
   }
+
   if (
     service === "deep-clean" ||
     service === "deep clean" ||
@@ -67,6 +80,7 @@ function normalizeServiceKey(value) {
   ) {
     return "deep-clean";
   }
+
   if (service === "lawn" || service.includes("lawn")) return "lawn";
 
   return service;
@@ -350,8 +364,11 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
           job_id: job.id,
           tech_id: existingTech.techId,
           tech_name: existingTech.techName,
+          tech_email: existingTech.tech.email || null,
           address: job.address,
           service_type: normalizeServiceKey(job.service_type),
+          google_event_id: job.google_event_id || null,
+          calendar_name: job.calendar_name || null,
           skipped: true,
         });
       }
@@ -398,8 +415,11 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
       job_id: job.id,
       tech_id: best.state.techId,
       tech_name: best.state.techName,
+      tech_email: best.state.tech.email || null,
       address: job.address,
       service_type: normalizeServiceKey(job.service_type),
+      google_event_id: job.google_event_id || null,
+      calendar_name: job.calendar_name || null,
       planned_start: plannedStart.toISOString(),
       planned_end: plannedEnd.toISOString(),
     });
@@ -411,10 +431,105 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
     routes: techStates.map((state) => ({
       tech_id: state.techId,
       tech_name: state.techName,
+      tech_email: state.tech.email || null,
       home_address: state.homeAddress,
       services: getTechServiceKeys(state.tech),
       stops: state.route,
     })),
+  };
+}
+
+function buildOAuthClient() {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+
+  if (!clientId) throw new Error("Missing GOOGLE_CLIENT_ID");
+  if (!clientSecret) throw new Error("Missing GOOGLE_CLIENT_SECRET");
+  if (!refreshToken) throw new Error("Missing GOOGLE_REFRESH_TOKEN");
+
+  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
+  oauth2Client.setCredentials({ refresh_token: refreshToken });
+
+  return oauth2Client;
+}
+
+async function listTargetCalendars(calendarApi) {
+  const response = await calendarApi.calendarList.list();
+  const calendars = response.data.items || [];
+
+  return calendars.filter((cal) =>
+    TARGET_CALENDAR_NAMES.includes(String(cal.summary || "").trim())
+  );
+}
+
+async function syncTechnicianGuestToGoogleEvent({
+  calendarApi,
+  calendarIdByName,
+  allTechnicianEmails,
+  job,
+  assignedTech,
+}) {
+  if (!job?.google_event_id) {
+    return { success: false, reason: "Missing google_event_id" };
+  }
+
+  if (!job?.calendar_name) {
+    return { success: false, reason: "Missing calendar_name" };
+  }
+
+  if (!assignedTech?.email) {
+    return { success: false, reason: "Assigned technician missing email" };
+  }
+
+  const calendarId = calendarIdByName.get(String(job.calendar_name).trim());
+  if (!calendarId) {
+    return {
+      success: false,
+      reason: `Calendar not found for ${job.calendar_name}`,
+    };
+  }
+
+  const existingEventResponse = await calendarApi.events.get({
+    calendarId,
+    eventId: job.google_event_id,
+  });
+
+  const existingEvent = existingEventResponse.data || {};
+  const existingAttendees = Array.isArray(existingEvent.attendees)
+    ? existingEvent.attendees
+    : [];
+
+  const filteredAttendees = existingAttendees.filter((attendee) => {
+    const email = String(attendee?.email || "").toLowerCase().trim();
+    return email && !allTechnicianEmails.has(email);
+  });
+
+  const assignedEmail = String(assignedTech.email).toLowerCase().trim();
+
+  const mergedAttendees = [
+    ...filteredAttendees,
+    {
+      email: assignedEmail,
+      displayName: getTechName(assignedTech),
+      responseStatus: "needsAction",
+    },
+  ];
+
+  await calendarApi.events.patch({
+    calendarId,
+    eventId: job.google_event_id,
+    sendUpdates: "all",
+    requestBody: {
+      attendees: mergedAttendees,
+    },
+  });
+
+  return {
+    success: true,
+    calendar_name: job.calendar_name,
+    google_event_id: job.google_event_id,
+    tech_email: assignedEmail,
   };
 }
 
@@ -473,6 +588,68 @@ export default async function handler(req, res) {
       if (updateError) throw updateError;
     }
 
+    const auth = buildOAuthClient();
+    const calendarApi = google.calendar({ version: "v3", auth });
+    const calendars = await listTargetCalendars(calendarApi);
+
+    const calendarIdByName = new Map(
+      calendars.map((cal) => [String(cal.summary || "").trim(), cal.id])
+    );
+
+    const technicianById = new Map(
+      techs.map((tech) => [String(tech.id), tech])
+    );
+
+    const allTechnicianEmails = new Set(
+      techs
+        .map((tech) => String(tech.email || "").toLowerCase().trim())
+        .filter(Boolean)
+    );
+
+    const inviteResults = [];
+
+    for (const assignment of assignments) {
+      const sourceJob = (jobs || []).find(
+        (job) => String(job.id) === String(assignment.job_id)
+      );
+
+      const assignedTech = technicianById.get(String(assignment.tech_id));
+
+      if (!sourceJob || !assignedTech) {
+        inviteResults.push({
+          success: false,
+          job_id: assignment.job_id,
+          reason: "Missing source job or technician",
+        });
+        continue;
+      }
+
+      try {
+        const result = await syncTechnicianGuestToGoogleEvent({
+          calendarApi,
+          calendarIdByName,
+          allTechnicianEmails,
+          job: sourceJob,
+          assignedTech,
+        });
+
+        inviteResults.push({
+          ...result,
+          job_id: assignment.job_id,
+          tech_name: getTechName(assignedTech),
+          title: sourceJob.title || "",
+        });
+      } catch (inviteError) {
+        inviteResults.push({
+          success: false,
+          job_id: assignment.job_id,
+          tech_name: assignedTech ? getTechName(assignedTech) : null,
+          title: sourceJob?.title || "",
+          reason: inviteError.message || "Failed to sync Google guest",
+        });
+      }
+    }
+
     return res.status(200).json({
       success: true,
       service_date: serviceDate,
@@ -485,6 +662,7 @@ export default async function handler(req, res) {
       assignments,
       unassigned_jobs: unassignedJobs,
       routes,
+      google_invite_results: inviteResults,
     });
   } catch (err) {
     console.error("route-tomorrow error:", err);
