@@ -1,418 +1,268 @@
-import { supabaseAdmin } from "../../lib/supabaseAdmin";
+import { google } from "googleapis";
+import { supabaseAdmin } from "../../../lib/supabaseAdmin";
 
-const DEFAULT_TRAVEL_BUFFER_MINUTES = 25;
+const TARGET_CALENDAR_NAMES = [
+  "Jiffy Lawn Bookings",
+  "Internal Booking",
+  "Windows/Eaves",
+  "Carpet Cleaning Bookings",
+  "Residential Deep Clean Bookings",
+  "BBQ Bookings",
+  "Power Washing",
+];
 
-function getTomorrowDateToronto() {
+function getTorontoDayBoundsForTomorrow() {
   const now = new Date();
 
-  const torontoParts = new Intl.DateTimeFormat("en-CA", {
+  const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Toronto",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(now);
 
-  const year = torontoParts.find((p) => p.type === "year")?.value;
-  const month = torontoParts.find((p) => p.type === "month")?.value;
-  const day = torontoParts.find((p) => p.type === "day")?.value;
+  const year = Number(parts.find((p) => p.type === "year")?.value);
+  const month = Number(parts.find((p) => p.type === "month")?.value);
+  const day = Number(parts.find((p) => p.type === "day")?.value);
 
-  const torontoDate = new Date(`${year}-${month}-${day}T12:00:00`);
-  torontoDate.setDate(torontoDate.getDate() + 1);
+  const tomorrow = new Date(Date.UTC(year, month - 1, day + 1, 0, 0, 0));
 
-  const yyyy = torontoDate.getFullYear();
-  const mm = String(torontoDate.getMonth() + 1).padStart(2, "0");
-  const dd = String(torontoDate.getDate()).padStart(2, "0");
+  const yyyy = tomorrow.getUTCFullYear();
+  const mm = String(tomorrow.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(tomorrow.getUTCDate()).padStart(2, "0");
 
-  return `${yyyy}-${mm}-${dd}`;
+  return {
+    serviceDate: `${yyyy}-${mm}-${dd}`,
+    timeMin: `${yyyy}-${mm}-${dd}T00:00:00-04:00`,
+    timeMax: `${yyyy}-${mm}-${dd}T23:59:59-04:00`,
+  };
 }
 
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
-    .replace(/[^a-z0-9\s,/-]/g, " ")
+    .replace(/[^a-z0-9/&\s-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function extractPostalPrefix(address) {
-  const text = String(address || "").toUpperCase();
-  const match = text.match(/\b([A-Z]\d[A-Z])\s?\d[A-Z]\d\b/);
-  return match ? match[1] : null;
+function detectServiceType({ title = "", description = "", calendarName = "" }) {
+  const combined = normalizeText(`${title} ${description}`);
+  const calendar = normalizeText(calendarName);
+
+  if (combined.includes("bbq")) return "bbq";
+  if (combined.includes("oven")) return "oven";
+  if (combined.includes("carpet")) return "carpet";
+  if (combined.includes("window")) return "windows";
+  if (combined.includes("eaves")) return "windows";
+  if (combined.includes("gutter")) return "gutter";
+  if (combined.includes("pressure wash")) return "pressure-washing";
+  if (combined.includes("power wash")) return "pressure-washing";
+  if (combined.includes("deep clean")) return "deep-clean";
+  if (combined.includes("residential deep clean")) return "deep-clean";
+  if (combined.includes("move out")) return "deep-clean";
+  if (combined.includes("move-in")) return "deep-clean";
+  if (combined.includes("lawn")) return "lawn";
+
+  if (calendar.includes("bbq")) return "bbq";
+  if (calendar.includes("carpet")) return "carpet";
+  if (calendar.includes("windows")) return "windows";
+  if (calendar.includes("eaves")) return "windows";
+  if (calendar.includes("power wash")) return "pressure-washing";
+  if (calendar.includes("deep clean")) return "deep-clean";
+  if (calendar.includes("lawn")) return "lawn";
+
+  return "general";
 }
 
-function tokenizeAddress(address) {
-  const cleaned = normalizeText(address)
-    .replace(
-      /\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|place|pl|crescent|cres|circle|cir|parkway|pkwy|unit|suite|ste|apt|apartment)\b/g,
-      " "
-    )
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!cleaned) return [];
-
-  const stopWords = new Set([
-    "on",
-    "ontario",
-    "canada",
-    "north",
-    "south",
-    "east",
-    "west",
-    "the",
-    "and",
-  ]);
-
-  return cleaned
-    .split(/[,\s]+/)
-    .map((token) => token.trim())
-    .filter((token) => token && token.length > 1 && !stopWords.has(token));
-}
-
-function overlapScore(a, b) {
-  const aTokens = new Set(tokenizeAddress(a));
-  const bTokens = new Set(tokenizeAddress(b));
-
-  let score = 0;
-  for (const token of aTokens) {
-    if (bTokens.has(token)) score += 1;
+function extractAddress(event) {
+  if (event.location && String(event.location).trim()) {
+    return String(event.location).trim();
   }
 
-  const aPostal = extractPostalPrefix(a);
-  const bPostal = extractPostalPrefix(b);
-  if (aPostal && bPostal && aPostal === bPostal) score += 5;
+  const description = String(event.description || "");
+  const lines = description
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
 
-  return score;
+  const addressLine =
+    lines.find((line) => /^address\s*:/i.test(line)) ||
+    lines.find((line) => /,\s*(ON|Ontario)\b/i.test(line)) ||
+    lines.find((line) => /,\s*Canada\b/i.test(line));
+
+  if (!addressLine) return "";
+
+  return addressLine.replace(/^address\s*:/i, "").trim();
 }
 
-function getServiceDurationMinutes(serviceType, title, description) {
-  const service = normalizeText(serviceType);
-  const combined = normalizeText(`${title || ""} ${description || ""}`);
-
-  if (service === "bbq") return 150;
-  if (service === "oven") return 120;
-  if (service === "carpet") return 120;
-  if (service === "windows") return 180;
-  if (service === "gutter") return 180;
-  if (service === "pressure-washing") return 180;
-  if (service === "deep-clean") return 240;
-  if (service === "lawn") return 90;
-  if (service === "general") {
-    if (combined.includes("bbq")) return 150;
-    if (combined.includes("oven")) return 120;
-    if (combined.includes("carpet")) return 120;
-    if (combined.includes("window")) return 180;
-    if (combined.includes("gutter")) return 180;
-    if (combined.includes("pressure")) return 180;
-    if (combined.includes("power wash")) return 180;
-    if (combined.includes("deep clean")) return 240;
-  }
-
-  return 120;
+function extractDescription(event) {
+  return String(event.description || "").trim();
 }
 
-function parseTimeOnDate(dateString, timeValue, fallback = "09:00:00") {
-  const raw = String(timeValue || fallback).trim();
+function toDbTime(value) {
+  if (!value) return null;
 
-  if (raw.includes("T")) {
-    const dt = new Date(raw);
-    if (!Number.isNaN(dt.getTime())) return dt;
-  }
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return null;
 
-  const match = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
-  if (match) {
-    const hh = String(match[1]).padStart(2, "0");
-    const mm = String(match[2]).padStart(2, "0");
-    const ss = String(match[3] || "00").padStart(2, "0");
-    return new Date(`${dateString}T${hh}:${mm}:${ss}`);
-  }
+  const hh = String(dt.getHours()).padStart(2, "0");
+  const mm = String(dt.getMinutes()).padStart(2, "0");
+  const ss = String(dt.getSeconds()).padStart(2, "0");
 
-  return new Date(`${dateString}T${fallback}`);
+  return `${hh}:${mm}:${ss}`;
 }
 
-function addMinutes(date, minutes) {
-  return new Date(date.getTime() + minutes * 60000);
+function getEventStart(event) {
+  return event?.start?.dateTime || null;
 }
 
-function getTechName(tech) {
-  return (
-    tech.display_name ||
-    [tech.first_name, tech.last_name].filter(Boolean).join(" ") ||
-    tech.legal_name ||
-    tech.email ||
-    `Tech ${tech.id}`
+function getEventEnd(event) {
+  return event?.end?.dateTime || null;
+}
+
+function buildOAuthClient() {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+
+  if (!clientId) throw new Error("Missing GOOGLE_CLIENT_ID");
+  if (!clientSecret) throw new Error("Missing GOOGLE_CLIENT_SECRET");
+  if (!refreshToken) throw new Error("Missing GOOGLE_REFRESH_TOKEN");
+
+  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
+  oauth2Client.setCredentials({ refresh_token: refreshToken });
+
+  return oauth2Client;
+}
+
+async function listTargetCalendars(calendarApi) {
+  const response = await calendarApi.calendarList.list();
+  const calendars = response.data.items || [];
+
+  return calendars.filter((cal) =>
+    TARGET_CALENDAR_NAMES.includes(String(cal.summary || "").trim())
   );
 }
 
-function buildTechStates(techs, serviceDate) {
-  return techs.map((tech, index) => ({
-    tech,
-    techId: tech.id,
-    techName: getTechName(tech),
-    homeAddress: tech.home_address || "",
-    clusterAnchor: tech.home_address || "",
-    sequence: index,
-    route: [],
-    nextAvailable: parseTimeOnDate(serviceDate, "08:00:00", "08:00:00"),
-  }));
-}
+async function fetchEventsForCalendar(calendarApi, calendarId, timeMin, timeMax) {
+  const response = await calendarApi.events.list({
+    calendarId,
+    timeMin,
+    timeMax,
+    singleEvents: true,
+    orderBy: "startTime",
+  });
 
-function sortJobsForPlanning(jobs, serviceDate) {
-  return [...jobs]
-    .filter((job) => job?.address && job?.arrival_window_start)
-    .sort((a, b) => {
-      const aStart = parseTimeOnDate(
-        serviceDate,
-        a.arrival_window_start,
-        "09:00:00"
-      ).getTime();
-      const bStart = parseTimeOnDate(
-        serviceDate,
-        b.arrival_window_start,
-        "09:00:00"
-      ).getTime();
-      return aStart - bStart;
-    });
-}
-
-function chooseBestTech(job, techStates, serviceDate) {
-  const windowStart = parseTimeOnDate(
-    serviceDate,
-    job.arrival_window_start,
-    "09:00:00"
-  );
-
-  const windowEnd = parseTimeOnDate(
-    serviceDate,
-    job.arrival_window_end || job.arrival_window_start,
-    "17:00:00"
-  );
-
-  const durationMinutes = getServiceDurationMinutes(
-    job.service_type,
-    job.title,
-    job.raw_description
-  );
-
-  let best = null;
-
-  for (const state of techStates) {
-    const lastStopAddress =
-      state.route.length > 0
-        ? state.route[state.route.length - 1].address
-        : state.homeAddress;
-
-    const anchorScore = overlapScore(job.address || "", state.clusterAnchor || "");
-    const routeScore = overlapScore(job.address || "", lastStopAddress || "");
-    const homeScore = overlapScore(job.address || "", state.homeAddress || "");
-
-    const proximityScore = anchorScore * 6 + routeScore * 4 + homeScore * 3;
-
-    const travelPenalty = Math.max(
-      0,
-      DEFAULT_TRAVEL_BUFFER_MINUTES - routeScore * 3 - anchorScore * 2
-    );
-
-    const earliestStart = new Date(
-      Math.max(state.nextAvailable.getTime(), windowStart.getTime())
-    );
-
-    const latePenalty = Math.max(
-      0,
-      Math.round((earliestStart.getTime() - windowEnd.getTime()) / 60000)
-    );
-
-    const workloadPenalty = state.route.length * 15;
-
-    const score =
-      travelPenalty + latePenalty * 10 + workloadPenalty - proximityScore * 5;
-
-    if (!best || score < best.score) {
-      best = {
-        state,
-        score,
-        durationMinutes,
-        plannedStart: earliestStart,
-      };
-    }
-  }
-
-  return best;
-}
-
-function planRoutes(jobs, techs, serviceDate, forceReassign) {
-  const techStates = buildTechStates(techs, serviceDate);
-  const orderedJobs = sortJobsForPlanning(jobs, serviceDate);
-  const assignments = [];
-
-  for (const job of orderedJobs) {
-    if (!job?.address || !job?.arrival_window_start) {
-      continue;
-    }
-
-    if (job.assigned_technician_id && !forceReassign) {
-      const existingTech = techStates.find(
-        (state) => String(state.techId) === String(job.assigned_technician_id)
-      );
-
-      if (existingTech) {
-        const plannedStart = parseTimeOnDate(
-          serviceDate,
-          job.arrival_window_start,
-          "09:00:00"
-        );
-        const durationMinutes = getServiceDurationMinutes(
-          job.service_type,
-          job.title,
-          job.raw_description
-        );
-        const plannedEnd = addMinutes(plannedStart, durationMinutes);
-
-        existingTech.route.push({
-          jobId: job.id,
-          title: job.title,
-          service_type: job.service_type,
-          address: job.address,
-          plannedStart: plannedStart.toISOString(),
-          plannedEnd: plannedEnd.toISOString(),
-          existing: true,
-        });
-
-        existingTech.nextAvailable = addMinutes(
-          plannedEnd,
-          DEFAULT_TRAVEL_BUFFER_MINUTES
-        );
-
-        assignments.push({
-          job_id: job.id,
-          tech_id: existingTech.techId,
-          tech_name: existingTech.techName,
-          address: job.address,
-          service_type: job.service_type,
-          skipped: true,
-        });
-      }
-
-      continue;
-    }
-
-    const best = chooseBestTech(job, techStates, serviceDate);
-    if (!best) continue;
-
-    const plannedStart = best.plannedStart;
-    const plannedEnd = addMinutes(plannedStart, best.durationMinutes);
-
-    best.state.route.push({
-      jobId: job.id,
-      title: job.title,
-      service_type: job.service_type,
-      address: job.address,
-      plannedStart: plannedStart.toISOString(),
-      plannedEnd: plannedEnd.toISOString(),
-      existing: false,
-    });
-
-    if (!best.state.clusterAnchor) {
-      best.state.clusterAnchor = job.address || best.state.homeAddress || "";
-    }
-
-    best.state.nextAvailable = addMinutes(
-      plannedEnd,
-      DEFAULT_TRAVEL_BUFFER_MINUTES
-    );
-
-    assignments.push({
-      job_id: job.id,
-      tech_id: best.state.techId,
-      tech_name: best.state.techName,
-      address: job.address,
-      service_type: job.service_type,
-      planned_start: plannedStart.toISOString(),
-      planned_end: plannedEnd.toISOString(),
-    });
-  }
-
-  return {
-    assignments,
-    routes: techStates.map((state) => ({
-      tech_id: state.techId,
-      tech_name: state.techName,
-      home_address: state.homeAddress,
-      stops: state.route,
-    })),
-  };
+  return response.data.items || [];
 }
 
 export default async function handler(req, res) {
+  if (req.method !== "GET" && req.method !== "POST") {
+    return res.status(405).json({ success: false, error: "Method not allowed" });
+  }
+
   try {
-    const serviceDate =
-      req.method === "POST" && req.body?.service_date
-        ? req.body.service_date
-        : getTomorrowDateToronto();
+    const { serviceDate, timeMin, timeMax } = getTorontoDayBoundsForTomorrow();
 
-    const forceReassign =
-      String(req.query?.force || req.body?.force || "")
-        .toLowerCase()
-        .trim() === "true";
+    const auth = buildOAuthClient();
+    const calendarApi = google.calendar({ version: "v3", auth });
 
-    const { data: jobs, error: jobsError } = await supabaseAdmin
-      .from("jobs")
-      .select("*")
-      .eq("service_date", serviceDate)
-      .order("arrival_window_start", { ascending: true });
+    const calendars = await listTargetCalendars(calendarApi);
 
-    if (jobsError) throw jobsError;
+    const allEvents = [];
 
-    const { data: techs, error: techError } = await supabaseAdmin
-      .from("technicians")
-      .select("*")
-      .eq("is_active", true)
-      .order("rank_position", { ascending: true, nullsFirst: false });
+    for (const cal of calendars) {
+      const events = await fetchEventsForCalendar(
+        calendarApi,
+        cal.id,
+        timeMin,
+        timeMax
+      );
 
-    if (techError) throw techError;
+      for (const event of events) {
+        const start = getEventStart(event);
+        const end = getEventEnd(event);
 
-    if (!techs || !techs.length) {
-      return res.status(400).json({
-        success: false,
-        message: "No active technicians found",
-      });
+        if (!start || !end) continue;
+
+        const title = String(event.summary || "").trim();
+        const address = extractAddress(event);
+        const description = extractDescription(event);
+        const calendarName = String(cal.summary || "").trim();
+        const serviceType = detectServiceType({
+          title,
+          description,
+          calendarName,
+        });
+
+        allEvents.push({
+          id: event.id,
+          title,
+          start,
+          end,
+          address,
+          description,
+          calendarName,
+          source: "google",
+          date: serviceDate,
+          serviceType,
+        });
+      }
     }
 
-    const { assignments, routes } = planRoutes(
-      jobs || [],
-      techs,
-      serviceDate,
-      forceReassign
-    );
+    let saved = 0;
+    let skipped = 0;
+    let dbError = null;
 
-    for (const assignment of assignments) {
-      if (assignment.skipped) continue;
+    for (const event of allEvents) {
+      const payload = {
+        google_event_id: event.id,
+        title: event.title,
+        address: event.address,
+        arrival_window_start: toDbTime(event.start),
+        arrival_window_end: toDbTime(event.end),
+        service_date: event.date,
+        raw_description: event.description,
+        job_source: "google",
+        service_type: event.serviceType || "general",
+        calendar_name: event.calendarName,
+      };
 
-      const { error: updateError } = await supabaseAdmin
+      const { error } = await supabaseAdmin
         .from("jobs")
-        .update({
-          assigned_technician_id: assignment.tech_id,
-        })
-        .eq("id", assignment.job_id);
+        .upsert(payload, {
+          onConflict: "google_event_id",
+          ignoreDuplicates: false,
+        });
 
-      if (updateError) throw updateError;
+      if (error) {
+        dbError = error.message;
+        skipped += 1;
+      } else {
+        saved += 1;
+      }
     }
 
     return res.status(200).json({
       success: true,
-      service_date: serviceDate,
-      force_reassign: forceReassign,
-      total_jobs: jobs.length,
-      total_technicians: techs.length,
-      assignments,
-      routes,
+      fetched: allEvents.length,
+      imported: allEvents.length,
+      saved,
+      skipped,
+      calendarNames: calendars.map((c) => c.summary),
+      timeMin,
+      timeMax,
+      samples: allEvents.slice(0, 5),
+      events: allEvents,
+      dbError,
     });
-  } catch (err) {
-    console.error("route-tomorrow error:", err);
+  } catch (error) {
+    console.error("import-tomorrow error:", error);
 
     return res.status(500).json({
       success: false,
-      error: err.message || "Unknown server error",
+      error: error.message || "Import failed",
     });
   }
 }
