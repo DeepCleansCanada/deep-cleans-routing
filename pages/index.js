@@ -1,10 +1,28 @@
 import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 
-function getTomorrowDate() {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  return d.toISOString().split("T")[0];
+function getTomorrowDateToronto() {
+  const now = new Date();
+
+  const torontoParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Toronto",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+
+  const year = torontoParts.find((p) => p.type === "year")?.value;
+  const month = torontoParts.find((p) => p.type === "month")?.value;
+  const day = torontoParts.find((p) => p.type === "day")?.value;
+
+  const torontoDate = new Date(`${year}-${month}-${day}T12:00:00`);
+  torontoDate.setDate(torontoDate.getDate() + 1);
+
+  const yyyy = torontoDate.getFullYear();
+  const mm = String(torontoDate.getMonth() + 1).padStart(2, "0");
+  const dd = String(torontoDate.getDate()).padStart(2, "0");
+
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 function getTechName(tech) {
@@ -28,12 +46,18 @@ export default function Home() {
   const [loadingJobs, setLoadingJobs] = useState(false);
   const [loadingImport, setLoadingImport] = useState(false);
   const [loadingRoute, setLoadingRoute] = useState(false);
-
-  const tomorrow = getTomorrowDate();
+  const [tomorrow, setTomorrow] = useState("");
 
   useEffect(() => {
-    loadPage();
+    const t = getTomorrowDateToronto();
+    setTomorrow(t);
   }, []);
+
+  useEffect(() => {
+    if (tomorrow) {
+      loadPage();
+    }
+  }, [tomorrow]);
 
   async function loadPage() {
     await Promise.all([fetchJobs(), fetchTechnicians()]);
@@ -156,7 +180,7 @@ export default function Home() {
       }}
     >
       <h1>Deep Cleans Routing</h1>
-      <p>Tomorrow: {tomorrow}</p>
+      <p>Tomorrow: {tomorrow || "-"}</p>
 
       <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
         <button onClick={handleRouteTomorrow} disabled={loadingRoute}>
