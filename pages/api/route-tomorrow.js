@@ -86,6 +86,29 @@ function normalizeServiceKey(value) {
   return service;
 }
 
+function getDayKeyFromServiceDate(serviceDate) {
+  const date = new Date(`${serviceDate}T12:00:00`);
+  const dayIndex = date.getDay();
+  const keys = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+  return keys[dayIndex];
+}
+
+function getWorkingDays(tech) {
+  if (!Array.isArray(tech.working_days) || tech.working_days.length === 0) {
+    return ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+  }
+
+  return tech.working_days
+    .map((d) => normalizeText(d))
+    .filter(Boolean)
+    .map((d) => d.slice(0, 3));
+}
+
+function techWorksOnServiceDate(tech, serviceDate) {
+  const dayKey = getDayKeyFromServiceDate(serviceDate);
+  return getWorkingDays(tech).includes(dayKey);
+}
+
 function extractPostalPrefix(address) {
   const text = String(address || "").toUpperCase();
   const match = text.match(/\b([A-Z]\d[A-Z])\s?\d[A-Z]\d\b/);
@@ -212,17 +235,40 @@ function techCanDoService(tech, job) {
   return techServices.includes(jobService);
 }
 
+function getTechShiftStart(tech, serviceDate) {
+  return parseTimeOnDate(
+    serviceDate,
+    tech.work_start_time || "08:00:00",
+    "08:00:00"
+  );
+}
+
+function getTechShiftEnd(tech, serviceDate) {
+  return parseTimeOnDate(
+    serviceDate,
+    tech.work_end_time || "17:00:00",
+    "17:00:00"
+  );
+}
+
 function buildTechStates(techs, serviceDate) {
-  return techs.map((tech, index) => ({
-    tech,
-    techId: tech.id,
-    techName: getTechName(tech),
-    homeAddress: tech.home_address || "",
-    clusterAnchor: tech.home_address || "",
-    sequence: index,
-    route: [],
-    nextAvailable: parseTimeOnDate(serviceDate, "08:00:00", "08:00:00"),
-  }));
+  return techs.map((tech, index) => {
+    const shiftStart = getTechShiftStart(tech, serviceDate);
+    const shiftEnd = getTechShiftEnd(tech, serviceDate);
+
+    return {
+      tech,
+      techId: tech.id,
+      techName: getTechName(tech),
+      homeAddress: tech.home_address || "",
+      clusterAnchor: tech.home_address || "",
+      sequence: index,
+      route: [],
+      shiftStart,
+      shiftEnd,
+      nextAvailable: shiftStart,
+    };
+  });
 }
 
 function sortJobsForPlanning(jobs, serviceDate) {
@@ -262,9 +308,25 @@ function chooseBestTech(job, techStates, serviceDate) {
     job.raw_description
   );
 
-  const eligibleTechStates = techStates.filter((state) =>
-    techCanDoService(state.tech, job)
-  );
+  const eligibleTechStates = techStates.filter((state) => {
+    if (!techCanDoService(state.tech, job)) return false;
+    if (!techWorksOnServiceDate(state.tech, serviceDate)) return false;
+
+    const earliestStart = new Date(
+      Math.max(
+        state.nextAvailable.getTime(),
+        windowStart.getTime(),
+        state.shiftStart.getTime()
+      )
+    );
+
+    const plannedEnd = addMinutes(earliestStart, durationMinutes);
+
+    if (earliestStart > state.shiftEnd) return false;
+    if (plannedEnd > state.shiftEnd) return false;
+
+    return true;
+  });
 
   if (!eligibleTechStates.length) {
     return null;
@@ -290,7 +352,11 @@ function chooseBestTech(job, techStates, serviceDate) {
     );
 
     const earliestStart = new Date(
-      Math.max(state.nextAvailable.getTime(), windowStart.getTime())
+      Math.max(
+        state.nextAvailable.getTime(),
+        windowStart.getTime(),
+        state.shiftStart.getTime()
+      )
     );
 
     const latePenalty = Math.max(
@@ -384,7 +450,7 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
         title: job.title,
         address: job.address,
         service_type: normalizeServiceKey(job.service_type),
-        reason: "No eligible technician found for this service type",
+        reason: "No eligible technician found within skill/day/shift constraints",
       });
       continue;
     }
@@ -434,6 +500,9 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
       tech_email: state.tech.email || null,
       home_address: state.homeAddress,
       services: getTechServiceKeys(state.tech),
+      working_days: getWorkingDays(state.tech),
+      work_start_time: state.tech.work_start_time || null,
+      work_end_time: state.tech.work_end_time || null,
       stops: state.route,
     })),
   };
