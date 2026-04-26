@@ -1,6 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 
+const DAY_OPTIONS = [
+  { key: "mon", label: "Mon" },
+  { key: "tue", label: "Tue" },
+  { key: "wed", label: "Wed" },
+  { key: "thu", label: "Thu" },
+  { key: "fri", label: "Fri" },
+  { key: "sat", label: "Sat" },
+  { key: "sun", label: "Sun" },
+];
+
 function getTomorrowDateToronto() {
   const now = new Date();
 
@@ -168,6 +178,13 @@ function groupJobsByTech(jobs, technicians) {
   };
 }
 
+function normalizeWorkingDays(days) {
+  if (!Array.isArray(days)) return [];
+  return days
+    .map((day) => String(day || "").toLowerCase().trim().slice(0, 3))
+    .filter(Boolean);
+}
+
 export default function Home() {
   const [jobs, setJobs] = useState([]);
   const [technicians, setTechnicians] = useState([]);
@@ -177,6 +194,7 @@ export default function Home() {
   const [loadingJobs, setLoadingJobs] = useState(false);
   const [loadingImport, setLoadingImport] = useState(false);
   const [loadingRoute, setLoadingRoute] = useState(false);
+  const [savingTechId, setSavingTechId] = useState(null);
   const [tomorrow, setTomorrow] = useState("");
 
   useEffect(() => {
@@ -227,6 +245,42 @@ export default function Home() {
       setTechnicians(Array.isArray(data) ? data : []);
     } catch (err) {
       setTechnicians([]);
+    }
+  }
+
+  async function updateTechnicianWorkingDays(tech, dayKey) {
+    try {
+      setSavingTechId(tech.id);
+      setError("");
+
+      const currentDays = normalizeWorkingDays(tech.working_days);
+      const nextDays = currentDays.includes(dayKey)
+        ? currentDays.filter((d) => d !== dayKey)
+        : [...currentDays, dayKey];
+
+      const sortedDays = DAY_OPTIONS
+        .map((d) => d.key)
+        .filter((d) => nextDays.includes(d));
+
+      setTechnicians((prev) =>
+        prev.map((t) =>
+          String(t.id) === String(tech.id)
+            ? { ...t, working_days: sortedDays }
+            : t
+        )
+      );
+
+      const { error } = await supabase
+        .from("technicians")
+        .update({ working_days: sortedDays })
+        .eq("id", tech.id);
+
+      if (error) throw error;
+    } catch (err) {
+      setError(err.message || "Failed to update technician availability");
+      await fetchTechnicians();
+    } finally {
+      setSavingTechId(null);
     }
   }
 
@@ -306,14 +360,16 @@ export default function Home() {
     <div
       style={{
         padding: 24,
-        maxWidth: 1280,
+        maxWidth: 1350,
         margin: "0 auto",
         fontFamily: "Arial, sans-serif",
         color: "#111827",
       }}
     >
       <h1 style={{ marginBottom: 8 }}>Deep Cleans Routing</h1>
-      <p style={{ marginTop: 0, color: "#4B5563" }}>Tomorrow: {tomorrow || "-"}</p>
+      <p style={{ marginTop: 0, color: "#4B5563" }}>
+        Tomorrow: {tomorrow || "-"}
+      </p>
 
       <div
         style={{
@@ -357,6 +413,98 @@ export default function Home() {
 
       <div
         style={{
+          border: "1px solid #E5E7EB",
+          borderRadius: 14,
+          padding: 16,
+          marginBottom: 24,
+          background: "#FFFFFF",
+        }}
+      >
+        <h2 style={{ marginTop: 0 }}>Technician Availability</h2>
+        <p style={{ marginTop: -6, color: "#6B7280" }}>
+          Toggle the days each technician is available. Changes save immediately.
+        </p>
+
+        <div style={{ overflowX: "auto" }}>
+          <table
+            style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              minWidth: 850,
+            }}
+          >
+            <thead>
+              <tr>
+                <th style={tableHeaderStyle}>Technician</th>
+                <th style={tableHeaderStyle}>Email</th>
+                <th style={tableHeaderStyle}>Hours</th>
+                {DAY_OPTIONS.map((day) => (
+                  <th key={day.key} style={tableHeaderStyle}>
+                    {day.label}
+                  </th>
+                ))}
+                <th style={tableHeaderStyle}>Saving</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {technicians.map((tech) => {
+                const workingDays = normalizeWorkingDays(tech.working_days);
+
+                return (
+                  <tr key={tech.id}>
+                    <td style={tableCellStyle}>
+                      <strong>{getTechName(tech)}</strong>
+                    </td>
+
+                    <td style={tableCellStyle}>{tech.email || "-"}</td>
+
+                    <td style={tableCellStyle}>
+                      {formatTime12h(tech.work_start_time)} →{" "}
+                      {formatTime12h(tech.work_end_time)}
+                    </td>
+
+                    {DAY_OPTIONS.map((day) => {
+                      const checked = workingDays.includes(day.key);
+
+                      return (
+                        <td
+                          key={day.key}
+                          style={{
+                            ...tableCellStyle,
+                            textAlign: "center",
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={savingTechId === tech.id}
+                            onChange={() =>
+                              updateTechnicianWorkingDays(tech, day.key)
+                            }
+                            style={{
+                              width: 18,
+                              height: 18,
+                              cursor: "pointer",
+                            }}
+                          />
+                        </td>
+                      );
+                    })}
+
+                    <td style={tableCellStyle}>
+                      {savingTechId === tech.id ? "Saving..." : ""}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div
+        style={{
           display: "grid",
           gridTemplateColumns: "1.35fr 0.9fr",
           gap: 20,
@@ -394,22 +542,12 @@ export default function Home() {
                       background: "#FFFFFF",
                     }}
                   >
-                    <div style={{ fontWeight: 700 }}>{job.title || "Untitled Job"}</div>
+                    <div style={{ fontWeight: 700 }}>
+                      {job.title || "Untitled Job"}
+                    </div>
 
                     <div style={{ marginTop: 6 }}>
-                      <span
-                        style={{
-                          display: "inline-block",
-                          padding: "4px 8px",
-                          borderRadius: 999,
-                          border: `1px solid ${badgeStyle.border}`,
-                          background: badgeStyle.bg,
-                          color: badgeStyle.text,
-                          fontSize: 12,
-                          fontWeight: 700,
-                          textTransform: "capitalize",
-                        }}
-                      >
+                      <span style={badgeStyleBase(badgeStyle)}>
                         {normalizeServiceType(job.service_type)}
                       </span>
                     </div>
@@ -458,15 +596,23 @@ export default function Home() {
                     </div>
                     <div style={{ color: "#4B5563", marginTop: 6 }}>
                       Skills:{" "}
-                      {Array.isArray(group.tech.services) && group.tech.services.length
+                      {Array.isArray(group.tech.services) &&
+                      group.tech.services.length
                         ? group.tech.services.join(", ")
+                        : "-"}
+                    </div>
+                    <div style={{ color: "#4B5563", marginTop: 6 }}>
+                      Available:{" "}
+                      {normalizeWorkingDays(group.tech.working_days).length
+                        ? normalizeWorkingDays(group.tech.working_days).join(", ")
                         : "-"}
                     </div>
                   </div>
 
                   <div style={{ textAlign: "right" }}>
                     <div style={{ fontWeight: 700 }}>
-                      {group.jobs.length} job{group.jobs.length === 1 ? "" : "s"}
+                      {group.jobs.length} job
+                      {group.jobs.length === 1 ? "" : "s"}
                     </div>
                     {routeLink ? (
                       <a
@@ -497,7 +643,7 @@ export default function Home() {
                       <div
                         key={job.id}
                         style={{
-                          borderTop: index === 0 ? "1px solid #F3F4F6" : "1px solid #F3F4F6",
+                          borderTop: "1px solid #F3F4F6",
                           paddingTop: 12,
                           marginTop: 12,
                         }}
@@ -517,24 +663,14 @@ export default function Home() {
                             </div>
 
                             <div style={{ marginTop: 6 }}>
-                              <span
-                                style={{
-                                  display: "inline-block",
-                                  padding: "4px 8px",
-                                  borderRadius: 999,
-                                  border: `1px solid ${badgeStyle.border}`,
-                                  background: badgeStyle.bg,
-                                  color: badgeStyle.text,
-                                  fontSize: 12,
-                                  fontWeight: 700,
-                                  textTransform: "capitalize",
-                                }}
-                              >
+                              <span style={badgeStyleBase(badgeStyle)}>
                                 {normalizeServiceType(job.service_type)}
                               </span>
                             </div>
 
-                            <div style={{ marginTop: 8 }}>{job.address || "-"}</div>
+                            <div style={{ marginTop: 8 }}>
+                              {job.address || "-"}
+                            </div>
                           </div>
 
                           <div
@@ -570,16 +706,10 @@ export default function Home() {
               background: "#FFFFFF",
             }}
           >
-            <div style={{ fontWeight: 700, marginBottom: 10 }}>Last Route Result</div>
-            <pre
-              style={{
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-                margin: 0,
-                fontSize: 12,
-                lineHeight: 1.45,
-              }}
-            >
+            <div style={{ fontWeight: 700, marginBottom: 10 }}>
+              Last Route Result
+            </div>
+            <pre style={preStyle}>
               {routeResult
                 ? JSON.stringify(routeResult, null, 2)
                 : "No routing run yet."}
@@ -594,16 +724,10 @@ export default function Home() {
               background: "#FFFFFF",
             }}
           >
-            <div style={{ fontWeight: 700, marginBottom: 10 }}>Last Import Result</div>
-            <pre
-              style={{
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-                margin: 0,
-                fontSize: 12,
-                lineHeight: 1.45,
-              }}
-            >
+            <div style={{ fontWeight: 700, marginBottom: 10 }}>
+              Last Import Result
+            </div>
+            <pre style={preStyle}>
               {importResult
                 ? JSON.stringify(importResult, null, 2)
                 : "No import run yet."}
@@ -613,4 +737,42 @@ export default function Home() {
       </div>
     </div>
   );
+}
+
+const tableHeaderStyle = {
+  textAlign: "left",
+  padding: "10px 8px",
+  borderBottom: "1px solid #E5E7EB",
+  background: "#F9FAFB",
+  fontSize: 13,
+  color: "#374151",
+};
+
+const tableCellStyle = {
+  padding: "10px 8px",
+  borderBottom: "1px solid #F3F4F6",
+  fontSize: 14,
+  verticalAlign: "middle",
+};
+
+const preStyle = {
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
+  margin: 0,
+  fontSize: 12,
+  lineHeight: 1.45,
+};
+
+function badgeStyleBase(badgeStyle) {
+  return {
+    display: "inline-block",
+    padding: "4px 8px",
+    borderRadius: 999,
+    border: `1px solid ${badgeStyle.border}`,
+    background: badgeStyle.bg,
+    color: badgeStyle.text,
+    fontSize: 12,
+    fontWeight: 700,
+    textTransform: "capitalize",
+  };
 }
