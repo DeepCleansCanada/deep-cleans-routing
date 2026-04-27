@@ -2,6 +2,7 @@ import { google } from "googleapis";
 import { supabaseAdmin } from "../../lib/supabaseAdmin";
 
 const DEFAULT_TRAVEL_BUFFER_MINUTES = 25;
+
 const TARGET_CALENDAR_NAMES = [
   "Jiffy Lawn Bookings",
   "Internal Booking",
@@ -88,9 +89,8 @@ function normalizeServiceKey(value) {
 
 function getDayKeyFromServiceDate(serviceDate) {
   const date = new Date(`${serviceDate}T12:00:00`);
-  const dayIndex = date.getDay();
   const keys = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
-  return keys[dayIndex];
+  return keys[date.getDay()];
 }
 
 function getWorkingDays(tech) {
@@ -251,6 +251,12 @@ function getTechShiftEnd(tech, serviceDate) {
   );
 }
 
+function getTechMaxJobs(tech) {
+  const value = Number(tech.max_jobs_per_day);
+  if (Number.isFinite(value) && value > 0) return value;
+  return 5;
+}
+
 function buildTechStates(techs, serviceDate) {
   return techs.map((tech, index) => {
     const shiftStart = getTechShiftStart(tech, serviceDate);
@@ -267,6 +273,7 @@ function buildTechStates(techs, serviceDate) {
       shiftStart,
       shiftEnd,
       nextAvailable: shiftStart,
+      maxJobs: getTechMaxJobs(tech),
     };
   });
 }
@@ -280,28 +287,18 @@ function sortJobsForPlanning(jobs, serviceDate) {
         a.arrival_window_start,
         "09:00:00"
       ).getTime();
+
       const bStart = parseTimeOnDate(
         serviceDate,
         b.arrival_window_start,
         "09:00:00"
       ).getTime();
+
       return aStart - bStart;
     });
 }
 
 function chooseBestTech(job, techStates, serviceDate) {
-  const windowStart = parseTimeOnDate(
-    serviceDate,
-    job.arrival_window_start,
-    "09:00:00"
-  );
-
-  const windowEnd = parseTimeOnDate(
-    serviceDate,
-    job.arrival_window_end || job.arrival_window_start,
-    "17:00:00"
-  );
-
   const durationMinutes = getServiceDurationMinutes(
     job.service_type,
     job.title,
@@ -311,20 +308,7 @@ function chooseBestTech(job, techStates, serviceDate) {
   const eligibleTechStates = techStates.filter((state) => {
     if (!techCanDoService(state.tech, job)) return false;
     if (!techWorksOnServiceDate(state.tech, serviceDate)) return false;
-
-    const earliestStart = new Date(
-      Math.max(
-        state.nextAvailable.getTime(),
-        windowStart.getTime(),
-        state.shiftStart.getTime()
-      )
-    );
-
-    const plannedEnd = addMinutes(earliestStart, durationMinutes);
-
-    if (earliestStart > state.shiftEnd) return false;
-    if (plannedEnd > state.shiftEnd) return false;
-
+    if (state.route.length >= state.maxJobs) return false;
     return true;
   });
 
@@ -346,35 +330,25 @@ function chooseBestTech(job, techStates, serviceDate) {
 
     const proximityScore = anchorScore * 6 + routeScore * 4 + homeScore * 3;
 
+    const capacityPenalty = state.route.length * 20;
     const travelPenalty = Math.max(
       0,
       DEFAULT_TRAVEL_BUFFER_MINUTES - routeScore * 3 - anchorScore * 2
     );
 
-    const earliestStart = new Date(
-      Math.max(
-        state.nextAvailable.getTime(),
-        windowStart.getTime(),
-        state.shiftStart.getTime()
-      )
-    );
-
-    const latePenalty = Math.max(
-      0,
-      Math.round((earliestStart.getTime() - windowEnd.getTime()) / 60000)
-    );
-
-    const workloadPenalty = state.route.length * 15;
-
     const score =
-      travelPenalty + latePenalty * 10 + workloadPenalty - proximityScore * 5;
+      capacityPenalty +
+      travelPenalty -
+      proximityScore * 5;
+
+    const plannedStart = state.nextAvailable;
 
     if (!best || score < best.score) {
       best = {
         state,
         score,
         durationMinutes,
-        plannedStart: earliestStart,
+        plannedStart,
       };
     }
   }
@@ -399,11 +373,7 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
       );
 
       if (existingTech) {
-        const plannedStart = parseTimeOnDate(
-          serviceDate,
-          job.arrival_window_start,
-          "09:00:00"
-        );
+        const plannedStart = existingTech.nextAvailable;
         const durationMinutes = getServiceDurationMinutes(
           job.service_type,
           job.title,
@@ -450,7 +420,7 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
         title: job.title,
         address: job.address,
         service_type: normalizeServiceKey(job.service_type),
-        reason: "No eligible technician found within skill/day/shift constraints",
+        reason: "No eligible technician found within skill/day/capacity constraints",
       });
       continue;
     }
@@ -503,6 +473,8 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
       working_days: getWorkingDays(state.tech),
       work_start_time: state.tech.work_start_time || null,
       work_end_time: state.tech.work_end_time || null,
+      max_jobs_per_day: state.maxJobs,
+      assigned_jobs_count: state.route.length,
       stops: state.route,
     })),
   };
