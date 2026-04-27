@@ -220,6 +220,31 @@ function getTechName(tech) {
   );
 }
 
+function getTechFirstName(tech) {
+  const name = getTechName(tech);
+  return String(name || "Tech").trim().split(/\s+/)[0] || "Tech";
+}
+
+function getOrdinal(n) {
+  const value = Number(n);
+  if (value === 1) return "1st";
+  if (value === 2) return "2nd";
+  if (value === 3) return "3rd";
+  return `${value}th`;
+}
+
+function stripExistingRoutePrefix(title) {
+  return String(title || "")
+    .replace(/^\s*\d+(st|nd|rd|th)\s+[a-zA-Z]+\s+/i, "")
+    .trim();
+}
+
+function buildRoutedTitle({ order, tech, originalTitle }) {
+  const cleanTitle = stripExistingRoutePrefix(originalTitle);
+  const firstName = getTechFirstName(tech);
+  return `${getOrdinal(order)} ${firstName} ${cleanTitle}`;
+}
+
 function getTechServiceKeys(tech) {
   if (!Array.isArray(tech.services)) return [];
   return tech.services.map(normalizeServiceKey).filter(Boolean);
@@ -381,14 +406,18 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
         );
         const plannedEnd = addMinutes(plannedStart, durationMinutes);
 
+        const routeOrder = existingTech.route.length + 1;
+
         existingTech.route.push({
           jobId: job.id,
           title: job.title,
+          originalTitle: job.title,
           service_type: normalizeServiceKey(job.service_type),
           address: job.address,
           plannedStart: plannedStart.toISOString(),
           plannedEnd: plannedEnd.toISOString(),
           existing: true,
+          routeOrder,
         });
 
         existingTech.nextAvailable = addMinutes(
@@ -405,6 +434,7 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
           service_type: normalizeServiceKey(job.service_type),
           google_event_id: job.google_event_id || null,
           calendar_name: job.calendar_name || null,
+          route_order: routeOrder,
           skipped: true,
         });
       }
@@ -428,14 +458,18 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
     const plannedStart = best.plannedStart;
     const plannedEnd = addMinutes(plannedStart, best.durationMinutes);
 
+    const routeOrder = best.state.route.length + 1;
+
     best.state.route.push({
       jobId: job.id,
       title: job.title,
+      originalTitle: job.title,
       service_type: normalizeServiceKey(job.service_type),
       address: job.address,
       plannedStart: plannedStart.toISOString(),
       plannedEnd: plannedEnd.toISOString(),
       existing: false,
+      routeOrder,
     });
 
     if (!best.state.clusterAnchor) {
@@ -456,6 +490,7 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
       service_type: normalizeServiceKey(job.service_type),
       google_event_id: job.google_event_id || null,
       calendar_name: job.calendar_name || null,
+      route_order: routeOrder,
       planned_start: plannedStart.toISOString(),
       planned_end: plannedEnd.toISOString(),
     });
@@ -572,6 +607,126 @@ async function syncTechnicianGuestToGoogleEvent({
     google_event_id: job.google_event_id,
     tech_email: assignedEmail,
   };
+}
+
+async function renameGoogleCalendarEvent({
+  calendarApi,
+  calendarIdByName,
+  job,
+  tech,
+  order,
+}) {
+  if (!job?.google_event_id || !job?.calendar_name) {
+    return {
+      success: false,
+      reason: "Missing google_event_id or calendar_name",
+    };
+  }
+
+  const calendarId = calendarIdByName.get(String(job.calendar_name).trim());
+  if (!calendarId) {
+    return {
+      success: false,
+      reason: `Calendar not found for ${job.calendar_name}`,
+    };
+  }
+
+  const newTitle = buildRoutedTitle({
+    order,
+    tech,
+    originalTitle: job.title,
+  });
+
+  await calendarApi.events.patch({
+    calendarId,
+    eventId: job.google_event_id,
+    requestBody: {
+      summary: newTitle,
+    },
+  });
+
+  const { error: updateError } = await supabaseAdmin
+    .from("jobs")
+    .update({
+      title: newTitle,
+    })
+    .eq("id", job.id);
+
+  if (updateError) {
+    throw updateError;
+  }
+
+  return {
+    success: true,
+    job_id: job.id,
+    google_event_id: job.google_event_id,
+    calendar_name: job.calendar_name,
+    new_title: newTitle,
+    route_order: order,
+  };
+}
+
+async function renameRoutedCalendarEvents({
+  calendarApi,
+  calendarIdByName,
+  routes,
+  jobs,
+  technicianById,
+}) {
+  const results = [];
+
+  for (const route of routes) {
+    if (!route.stops || route.stops.length === 0) continue;
+
+    const tech = technicianById.get(String(route.tech_id));
+    if (!tech) continue;
+
+    for (let index = 0; index < route.stops.length; index++) {
+      const stop = route.stops[index];
+      const order = index + 1;
+
+      const job = (jobs || []).find(
+        (j) => String(j.id) === String(stop.jobId)
+      );
+
+      if (!job) {
+        results.push({
+          success: false,
+          job_id: stop.jobId,
+          reason: "Job not found for title rewrite",
+        });
+        continue;
+      }
+
+      try {
+        const result = await renameGoogleCalendarEvent({
+          calendarApi,
+          calendarIdByName,
+          job,
+          tech,
+          order,
+        });
+
+        stop.title = result.new_title;
+        stop.routeOrder = order;
+
+        results.push({
+          ...result,
+          tech_name: getTechName(tech),
+        });
+      } catch (err) {
+        results.push({
+          success: false,
+          job_id: job.id,
+          tech_name: getTechName(tech),
+          title: job.title || "",
+          reason: err.message || "Failed to rename calendar event",
+        });
+      }
+    }
+  }
+
+  return results;
 }
 
 function formatTime12h(timeValue) {
@@ -844,6 +999,14 @@ export default async function handler(req, res) {
       }
     }
 
+    const titleRewriteResults = await renameRoutedCalendarEvents({
+      calendarApi,
+      calendarIdByName,
+      routes,
+      jobs: jobs || [],
+      technicianById,
+    });
+
     const emailResults = [];
 
     for (const route of routes) {
@@ -883,6 +1046,7 @@ export default async function handler(req, res) {
       unassigned_jobs: unassignedJobs,
       routes,
       google_invite_results: inviteResults,
+      title_rewrite_results: titleRewriteResults,
       route_email_results: emailResults,
       route_email_sender: senderEmail,
     });
