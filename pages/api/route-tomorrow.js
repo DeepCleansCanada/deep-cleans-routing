@@ -2,6 +2,10 @@ import { google } from "googleapis";
 import { supabaseAdmin } from "../../lib/supabaseAdmin";
 
 const DEFAULT_TRAVEL_BUFFER_MINUTES = 25;
+const FLEET_RETURN_HOME_SCORING = true;
+
+const TIME_WINDOW_SMALL_GRACE_MINUTES = 60;
+const TIME_WINDOW_LARGE_GRACE_MINUTES = 180;
 
 const TARGET_CALENDAR_NAMES = [
   "Jiffy Lawn Bookings",
@@ -11,85 +15,6 @@ const TARGET_CALENDAR_NAMES = [
   "Residential Deep Clean Bookings",
   "BBQ Bookings",
   "Power Washing",
-];
-
-const CORRIDOR_KEYWORDS = [
-  {
-    name: "hamilton_burlington_oakville",
-    keywords: [
-      "hamilton",
-      "burlington",
-      "oakville",
-      "dundas",
-      "ancaster",
-      "stoney creek",
-      "grimsby",
-      "waterdown",
-    ],
-  },
-  {
-    name: "mississauga_brampton_milton",
-    keywords: [
-      "mississauga",
-      "brampton",
-      "milton",
-      "caledon",
-      "georgetown",
-      "halton hills",
-    ],
-  },
-  {
-    name: "toronto_etobicoke_york",
-    keywords: [
-      "toronto",
-      "etobicoke",
-      "york",
-      "east york",
-      "liberty village",
-      "high park",
-      "roncesvalles",
-      "the beaches",
-      "leslieville",
-    ],
-  },
-  {
-    name: "north_york_vaughan_richmond_hill",
-    keywords: [
-      "north york",
-      "vaughan",
-      "richmond hill",
-      "thornhill",
-      "maple",
-      "woodbridge",
-      "concord",
-      "king city",
-    ],
-  },
-  {
-    name: "markham_scarborough_pickering_ajax",
-    keywords: [
-      "markham",
-      "scarborough",
-      "pickering",
-      "ajax",
-      "whitby",
-      "oshawa",
-      "stouffville",
-      "uxbridge",
-    ],
-  },
-  {
-    name: "newmarket_aurora_barrie",
-    keywords: [
-      "newmarket",
-      "aurora",
-      "bradford",
-      "innisfil",
-      "barrie",
-      "east gwillimbury",
-      "georgina",
-    ],
-  },
 ];
 
 function getTomorrowDateToronto() {
@@ -194,36 +119,6 @@ function extractPostalPrefix(address) {
   return match ? match[1] : null;
 }
 
-function getCorridorName(address) {
-  const text = normalizeText(address);
-
-  for (const corridor of CORRIDOR_KEYWORDS) {
-    for (const keyword of corridor.keywords) {
-      if (text.includes(keyword)) {
-        return corridor.name;
-      }
-    }
-  }
-
-  const postal = extractPostalPrefix(address);
-
-  if (!postal) return "unknown";
-
-  if (/^L[0-9][A-Z]/.test(postal)) {
-    return "hamilton_burlington_oakville";
-  }
-
-  if (/^M[0-9][A-Z]/.test(postal)) {
-    return "toronto_etobicoke_york";
-  }
-
-  if (/^L6[A-Z]/.test(postal) || /^L7[A-Z]/.test(postal)) {
-    return "mississauga_brampton_milton";
-  }
-
-  return "unknown";
-}
-
 function tokenizeAddress(address) {
   const cleaned = normalizeText(address)
     .replace(
@@ -273,7 +168,7 @@ function getServiceDurationMinutes(serviceType, title, description) {
   const service = normalizeServiceKey(serviceType);
   const combined = normalizeText(`${title || ""} ${description || ""}`);
 
-  if (service === "bbq") return 150;
+  if (service === "bbq") return 120;
   if (service === "oven") return 120;
   if (service === "carpet") return 120;
   if (service === "windows") return 180;
@@ -283,7 +178,7 @@ function getServiceDurationMinutes(serviceType, title, description) {
   if (service === "lawn") return 90;
 
   if (service === "general") {
-    if (combined.includes("bbq")) return 150;
+    if (combined.includes("bbq")) return 120;
     if (combined.includes("oven")) return 120;
     if (combined.includes("carpet")) return 120;
     if (combined.includes("window")) return 180;
@@ -377,14 +272,6 @@ function getTechShiftStart(tech, serviceDate) {
   );
 }
 
-function getTechShiftEnd(tech, serviceDate) {
-  return parseTimeOnDate(
-    serviceDate,
-    tech.work_end_time || "17:00:00",
-    "17:00:00"
-  );
-}
-
 function getTechMaxJobs(tech) {
   const value = Number(tech.max_jobs_per_day);
   if (Number.isFinite(value) && value > 0) return value;
@@ -394,21 +281,15 @@ function getTechMaxJobs(tech) {
 function buildTechStates(techs, serviceDate) {
   return techs.map((tech, index) => {
     const shiftStart = getTechShiftStart(tech, serviceDate);
-    const shiftEnd = getTechShiftEnd(tech, serviceDate);
-    const homeCorridor = getCorridorName(tech.home_address || "");
 
     return {
       tech,
       techId: tech.id,
       techName: getTechName(tech),
       homeAddress: tech.home_address || "",
-      homeCorridor,
-      activeCorridors: new Set(homeCorridor !== "unknown" ? [homeCorridor] : []),
-      clusterAnchor: tech.home_address || "",
       sequence: index,
       route: [],
       shiftStart,
-      shiftEnd,
       nextAvailable: shiftStart,
       maxJobs: getTechMaxJobs(tech),
     };
@@ -435,6 +316,123 @@ function sortJobsForPlanning(jobs, serviceDate) {
     });
 }
 
+function addressKey(address) {
+  return normalizeText(address);
+}
+
+function matrixKey(from, to) {
+  return `${addressKey(from)}|||${addressKey(to)}`;
+}
+
+function getMatrixMinutes(matrix, from, to) {
+  if (!from || !to) return 9999;
+  if (addressKey(from) === addressKey(to)) return 0;
+
+  const value = matrix.get(matrixKey(from, to));
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+
+  const fallbackScore = overlapScore(from, to);
+  if (fallbackScore > 5) return 15;
+  if (fallbackScore > 2) return 30;
+  return 75;
+}
+
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+async function buildDrivingTimeMatrix(addresses) {
+  const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+  const matrix = new Map();
+
+  const uniqueAddresses = Array.from(
+    new Set(addresses.map((a) => String(a || "").trim()).filter(Boolean))
+  );
+
+  if (!apiKey) {
+    return {
+      matrix,
+      diagnostics: {
+        success: false,
+        reason: "Missing GOOGLE_MAPS_API_KEY, using fallback address scoring",
+        address_count: uniqueAddresses.length,
+      },
+    };
+  }
+
+  const originChunks = chunkArray(uniqueAddresses, 10);
+  const destinationChunks = chunkArray(uniqueAddresses, 10);
+  const errors = [];
+
+  for (const origins of originChunks) {
+    for (const destinations of destinationChunks) {
+      const params = new URLSearchParams({
+        origins: origins.join("|"),
+        destinations: destinations.join("|"),
+        mode: "driving",
+        units: "metric",
+        key: apiKey,
+      });
+
+      const url = `https://maps.googleapis.com/maps/api/distancematrix/json?${params.toString()}`;
+
+      try {
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (data.status !== "OK") {
+          errors.push({
+            status: data.status,
+            message: data.error_message || "Distance Matrix request failed",
+          });
+          continue;
+        }
+
+        const rows = data.rows || [];
+
+        rows.forEach((row, originIndex) => {
+          const origin = origins[originIndex];
+          const elements = row.elements || [];
+
+          elements.forEach((element, destinationIndex) => {
+            const destination = destinations[destinationIndex];
+
+            if (element.status === "OK") {
+              const seconds =
+                element.duration_in_traffic?.value ||
+                element.duration?.value ||
+                null;
+
+              if (typeof seconds === "number") {
+                matrix.set(matrixKey(origin, destination), Math.round(seconds / 60));
+              }
+            }
+          });
+        });
+      } catch (err) {
+        errors.push({
+          status: "FETCH_ERROR",
+          message: err.message || "Distance Matrix fetch failed",
+        });
+      }
+    }
+  }
+
+  return {
+    matrix,
+    diagnostics: {
+      success: errors.length === 0,
+      address_count: uniqueAddresses.length,
+      pair_count: matrix.size,
+      errors,
+    },
+  };
+}
+
 function jobIsEligibleForTech(job, state, serviceDate) {
   if (!techCanDoService(state.tech, job)) return false;
   if (!techWorksOnServiceDate(state.tech, serviceDate)) return false;
@@ -442,102 +440,215 @@ function jobIsEligibleForTech(job, state, serviceDate) {
   return true;
 }
 
-function corridorScore(job, state) {
-  const jobCorridor = getCorridorName(job.address || "");
-  let score = 0;
-
-  if (jobCorridor !== "unknown" && jobCorridor === state.homeCorridor) {
-    score += 250;
+function calculateRouteDriveMinutes(state, stops, drivingMatrix) {
+  if (!state.homeAddress || !Array.isArray(stops) || stops.length === 0) {
+    return 0;
   }
 
-  if (jobCorridor !== "unknown" && state.activeCorridors.has(jobCorridor)) {
-    score += 400;
+  let total = 0;
+  let previousAddress = state.homeAddress;
+
+  for (const stop of stops) {
+    total += getMatrixMinutes(drivingMatrix, previousAddress, stop.address);
+    previousAddress = stop.address;
   }
 
-  if (state.activeCorridors.size > 0 && jobCorridor !== "unknown" && !state.activeCorridors.has(jobCorridor)) {
-    score -= 350;
+  if (FLEET_RETURN_HOME_SCORING && previousAddress) {
+    total += getMatrixMinutes(drivingMatrix, previousAddress, state.homeAddress);
   }
 
-  return score;
+  return total;
 }
 
-function addressProximityScore(job, address) {
-  const base = overlapScore(job.address || "", address || "") * 40;
+function calculateRouteTimePenalty(state, stops, serviceDate, drivingMatrix) {
+  if (!Array.isArray(stops) || stops.length === 0) return 0;
 
-  const jobPostal = extractPostalPrefix(job.address || "");
-  const addressPostal = extractPostalPrefix(address || "");
+  let totalPenalty = 0;
+  let currentTime = new Date(state.shiftStart.getTime());
+  let previousAddress = state.homeAddress;
 
-  const postalBoost =
-    jobPostal && addressPostal && jobPostal === addressPostal ? 150 : 0;
+  for (const stop of stops) {
+    const travelMinutes = getMatrixMinutes(
+      drivingMatrix,
+      previousAddress,
+      stop.address
+    );
 
-  return base + postalBoost;
+    currentTime = addMinutes(currentTime, travelMinutes);
+
+    const job = stop.job || stop;
+
+    const windowStart = parseTimeOnDate(
+      serviceDate,
+      job.arrival_window_start,
+      "09:00:00"
+    );
+
+    const windowEnd = parseTimeOnDate(
+      serviceDate,
+      job.arrival_window_end || job.arrival_window_start,
+      "12:00:00"
+    );
+
+    if (currentTime < windowStart) {
+      const earlyMinutes = Math.round(
+        (windowStart.getTime() - currentTime.getTime()) / 60000
+      );
+
+      if (earlyMinutes <= TIME_WINDOW_SMALL_GRACE_MINUTES) {
+        totalPenalty += earlyMinutes * 0.03;
+      } else if (earlyMinutes <= TIME_WINDOW_LARGE_GRACE_MINUTES) {
+        totalPenalty += TIME_WINDOW_SMALL_GRACE_MINUTES * 0.03;
+        totalPenalty += (earlyMinutes - TIME_WINDOW_SMALL_GRACE_MINUTES) * 0.08;
+      } else {
+        totalPenalty += TIME_WINDOW_SMALL_GRACE_MINUTES * 0.03;
+        totalPenalty +=
+          (TIME_WINDOW_LARGE_GRACE_MINUTES - TIME_WINDOW_SMALL_GRACE_MINUTES) *
+          0.08;
+        totalPenalty += (earlyMinutes - TIME_WINDOW_LARGE_GRACE_MINUTES) * 0.25;
+      }
+    }
+
+    if (currentTime > windowEnd) {
+      const lateMinutes = Math.round(
+        (currentTime.getTime() - windowEnd.getTime()) / 60000
+      );
+
+      if (lateMinutes <= TIME_WINDOW_SMALL_GRACE_MINUTES) {
+        totalPenalty += lateMinutes * 0.08;
+      } else if (lateMinutes <= TIME_WINDOW_LARGE_GRACE_MINUTES) {
+        totalPenalty += TIME_WINDOW_SMALL_GRACE_MINUTES * 0.08;
+        totalPenalty += (lateMinutes - TIME_WINDOW_SMALL_GRACE_MINUTES) * 0.18;
+      } else {
+        totalPenalty += TIME_WINDOW_SMALL_GRACE_MINUTES * 0.08;
+        totalPenalty +=
+          (TIME_WINDOW_LARGE_GRACE_MINUTES - TIME_WINDOW_SMALL_GRACE_MINUTES) *
+          0.18;
+        totalPenalty += (lateMinutes - TIME_WINDOW_LARGE_GRACE_MINUTES) * 0.75;
+      }
+    }
+
+    const durationMinutes = getServiceDurationMinutes(
+      job.service_type,
+      job.title,
+      job.raw_description
+    );
+
+    currentTime = addMinutes(currentTime, durationMinutes);
+    previousAddress = stop.address;
+  }
+
+  return totalPenalty;
 }
 
-function timeWindowSoftPenalty(job, plannedStart, serviceDate) {
-  const windowStart = parseTimeOnDate(
+function buildStopFromJob(job, existing = false) {
+  return {
+    job,
+    jobId: job.id,
+    title: job.title,
+    originalTitle: job.title,
+    service_type: normalizeServiceKey(job.service_type),
+    address: job.address,
+    plannedStart: null,
+    plannedEnd: null,
+    existing,
+    routeOrder: null,
+  };
+}
+
+function rebuildStateSchedule(state, serviceDate, drivingMatrix) {
+  let currentTime = new Date(state.shiftStart.getTime());
+  let previousAddress = state.homeAddress;
+
+  state.route = state.route.map((stop, index) => {
+    const travelMinutes = getMatrixMinutes(
+      drivingMatrix,
+      previousAddress,
+      stop.address
+    );
+
+    currentTime = addMinutes(currentTime, travelMinutes);
+
+    const job = stop.job || stop;
+    const durationMinutes = getServiceDurationMinutes(
+      job.service_type,
+      job.title,
+      job.raw_description
+    );
+
+    const plannedStart = new Date(currentTime.getTime());
+    const plannedEnd = addMinutes(plannedStart, durationMinutes);
+
+    currentTime = addMinutes(plannedEnd, DEFAULT_TRAVEL_BUFFER_MINUTES);
+    previousAddress = stop.address;
+
+    return {
+      ...stop,
+      plannedStart: plannedStart.toISOString(),
+      plannedEnd: plannedEnd.toISOString(),
+      routeOrder: index + 1,
+    };
+  });
+
+  state.nextAvailable = currentTime;
+}
+
+function findBestInsertionForJob(state, job, serviceDate, drivingMatrix) {
+  if (!jobIsEligibleForTech(job, state, serviceDate)) return null;
+
+  const currentDrive = calculateRouteDriveMinutes(
+    state,
+    state.route,
+    drivingMatrix
+  );
+
+  const currentTimePenalty = calculateRouteTimePenalty(
+    state,
+    state.route,
     serviceDate,
-    job.arrival_window_start,
-    "09:00:00"
+    drivingMatrix
   );
-
-  const windowEnd = parseTimeOnDate(
-    serviceDate,
-    job.arrival_window_end || job.arrival_window_start,
-    "12:00:00"
-  );
-
-  if (plannedStart >= windowStart && plannedStart <= windowEnd) return 0;
-
-  const earlyMinutes = Math.max(
-    0,
-    Math.round((windowStart.getTime() - plannedStart.getTime()) / 60000)
-  );
-
-  const lateMinutes = Math.max(
-    0,
-    Math.round((plannedStart.getTime() - windowEnd.getTime()) / 60000)
-  );
-
-  if (earlyMinutes > 0) {
-    return Math.min(earlyMinutes, 90) * 0.6;
-  }
-
-  if (lateMinutes > 0) {
-    return Math.min(lateMinutes, 90) * 1.2 + Math.max(0, lateMinutes - 90) * 3;
-  }
-
-  return 0;
-}
-
-function chooseBestTech(job, techStates, serviceDate) {
-  const eligibleTechStates = techStates.filter((state) =>
-    jobIsEligibleForTech(job, state, serviceDate)
-  );
-
-  if (!eligibleTechStates.length) return null;
 
   let best = null;
 
-  for (const state of eligibleTechStates) {
-    const lastStopAddress =
-      state.route.length > 0
-        ? state.route[state.route.length - 1].address
-        : state.homeAddress;
+  for (let position = 0; position <= state.route.length; position++) {
+    const candidateStop = buildStopFromJob(job, false);
 
-    const plannedStart = state.nextAvailable;
+    const candidateStops = [
+      ...state.route.slice(0, position),
+      candidateStop,
+      ...state.route.slice(position),
+    ];
+
+    const candidateDrive = calculateRouteDriveMinutes(
+      state,
+      candidateStops,
+      drivingMatrix
+    );
+
+    const candidateTimePenalty = calculateRouteTimePenalty(
+      state,
+      candidateStops,
+      serviceDate,
+      drivingMatrix
+    );
+
+    const driveIncrease = candidateDrive - currentDrive;
+    const timePenaltyIncrease = candidateTimePenalty - currentTimePenalty;
 
     const score =
-      corridorScore(job, state) +
-      addressProximityScore(job, lastStopAddress) * 1.4 +
-      addressProximityScore(job, state.clusterAnchor) * 1.2 +
-      addressProximityScore(job, state.homeAddress) * 0.7 -
-      timeWindowSoftPenalty(job, plannedStart, serviceDate) -
-      state.route.length * 20;
+      driveIncrease * 15 +
+      timePenaltyIncrease * 1.25 +
+      state.route.length * 2;
 
-    if (!best || score > best.score) {
+    if (!best || score < best.score) {
       best = {
         state,
+        job,
+        position,
         score,
+        driveIncrease,
+        timePenaltyIncrease,
       };
     }
   }
@@ -545,39 +656,27 @@ function chooseBestTech(job, techStates, serviceDate) {
   return best;
 }
 
-function addJobToStateRoute({ state, job, serviceDate, existing }) {
-  const durationMinutes = getServiceDurationMinutes(
-    job.service_type,
-    job.title,
-    job.raw_description
-  );
+function addJobToStateAtPosition({
+  state,
+  job,
+  position,
+  serviceDate,
+  drivingMatrix,
+  existing = false,
+}) {
+  const stop = buildStopFromJob(job, existing);
 
-  const plannedStart = state.nextAvailable;
-  const plannedEnd = addMinutes(plannedStart, durationMinutes);
-  const routeOrder = state.route.length + 1;
+  state.route = [
+    ...state.route.slice(0, position),
+    stop,
+    ...state.route.slice(position),
+  ];
 
-  const jobCorridor = getCorridorName(job.address || "");
-  if (jobCorridor !== "unknown") {
-    state.activeCorridors.add(jobCorridor);
-  }
+  rebuildStateSchedule(state, serviceDate, drivingMatrix);
+}
 
-  if (!state.clusterAnchor || state.clusterAnchor === state.homeAddress) {
-    state.clusterAnchor = job.address || state.clusterAnchor;
-  }
-
-  state.route.push({
-    jobId: job.id,
-    title: job.title,
-    originalTitle: job.title,
-    service_type: normalizeServiceKey(job.service_type),
-    address: job.address,
-    plannedStart: plannedStart.toISOString(),
-    plannedEnd: plannedEnd.toISOString(),
-    existing,
-    routeOrder,
-  });
-
-  state.nextAvailable = addMinutes(plannedEnd, DEFAULT_TRAVEL_BUFFER_MINUTES);
+function makeAssignmentFromStateStop(state, stop) {
+  const job = stop.job || stop;
 
   return {
     job_id: job.id,
@@ -588,57 +687,16 @@ function addJobToStateRoute({ state, job, serviceDate, existing }) {
     service_type: normalizeServiceKey(job.service_type),
     google_event_id: job.google_event_id || null,
     calendar_name: job.calendar_name || null,
-    route_order: routeOrder,
-    planned_start: plannedStart.toISOString(),
-    planned_end: plannedEnd.toISOString(),
-    skipped: existing,
+    route_order: stop.routeOrder,
+    planned_start: stop.plannedStart,
+    planned_end: stop.plannedEnd,
+    skipped: Boolean(stop.existing),
   };
 }
 
-function seedFirstJobForEachTech(remainingJobs, techStates, serviceDate, assignments) {
-  for (const state of techStates) {
-    if (!techWorksOnServiceDate(state.tech, serviceDate)) continue;
-    if (state.route.length > 0) continue;
-    if (state.route.length >= state.maxJobs) continue;
-
-    let best = null;
-
-    for (const job of remainingJobs) {
-      if (!jobIsEligibleForTech(job, state, serviceDate)) continue;
-
-      const score =
-        corridorScore(job, state) +
-        addressProximityScore(job, state.homeAddress) * 2 -
-        timeWindowSoftPenalty(job, state.nextAvailable, serviceDate);
-
-      if (!best || score > best.score) {
-        best = { job, score };
-      }
-    }
-
-    if (!best) continue;
-
-    const assignment = addJobToStateRoute({
-      state,
-      job: best.job,
-      serviceDate,
-      existing: false,
-    });
-
-    assignments.push(assignment);
-
-    const index = remainingJobs.findIndex(
-      (job) => String(job.id) === String(best.job.id)
-    );
-
-    if (index >= 0) remainingJobs.splice(index, 1);
-  }
-}
-
-function planRoutes(jobs, techs, serviceDate, forceReassign) {
+async function planRoutes(jobs, techs, serviceDate, forceReassign, drivingMatrix) {
   const techStates = buildTechStates(techs, serviceDate);
   const orderedJobs = sortJobsForPlanning(jobs, serviceDate);
-  const assignments = [];
   const unassignedJobs = [];
 
   if (!forceReassign) {
@@ -652,75 +710,98 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
 
       if (!existingTech) continue;
 
-      const assignment = addJobToStateRoute({
+      const position = existingTech.route.length;
+
+      addJobToStateAtPosition({
         state: existingTech,
         job,
+        position,
         serviceDate,
+        drivingMatrix,
         existing: true,
       });
-
-      assignments.push(assignment);
     }
   }
 
-  const assignedJobIds = new Set(assignments.map((a) => String(a.job_id)));
+  const alreadyAssignedJobIds = new Set();
+
+  for (const state of techStates) {
+    for (const stop of state.route) {
+      const job = stop.job || stop;
+      alreadyAssignedJobIds.add(String(job.id));
+    }
+  }
 
   const remainingJobs = orderedJobs.filter((job) => {
     if (!job?.address || !job?.arrival_window_start) return false;
+    if (alreadyAssignedJobIds.has(String(job.id))) return false;
     if (!forceReassign && job.assigned_technician_id) return false;
-    return !assignedJobIds.has(String(job.id));
+    return true;
   });
-
-  seedFirstJobForEachTech(remainingJobs, techStates, serviceDate, assignments);
 
   let guard = 0;
 
-  while (remainingJobs.length > 0 && guard < 1000) {
+  while (remainingJobs.length > 0 && guard < 2000) {
     guard += 1;
 
-    let bestMove = null;
+    let bestGlobalInsertion = null;
 
     for (const job of remainingJobs) {
-      const best = chooseBestTech(job, techStates, serviceDate);
-      if (!best) continue;
-
-      if (!bestMove || best.score > bestMove.score) {
-        bestMove = {
+      for (const state of techStates) {
+        const candidate = findBestInsertionForJob(
+          state,
           job,
-          state: best.state,
-          score: best.score,
-        };
+          serviceDate,
+          drivingMatrix
+        );
+
+        if (!candidate) continue;
+
+        if (!bestGlobalInsertion || candidate.score < bestGlobalInsertion.score) {
+          bestGlobalInsertion = candidate;
+        }
       }
     }
 
-    if (!bestMove) {
+    if (!bestGlobalInsertion) {
       for (const job of remainingJobs) {
         unassignedJobs.push({
           job_id: job.id,
           title: job.title,
           address: job.address,
           service_type: normalizeServiceKey(job.service_type),
-          corridor: getCorridorName(job.address || ""),
           reason: "No eligible technician found within skill/day/capacity constraints",
         });
       }
       break;
     }
 
-    const assignment = addJobToStateRoute({
-      state: bestMove.state,
-      job: bestMove.job,
+    addJobToStateAtPosition({
+      state: bestGlobalInsertion.state,
+      job: bestGlobalInsertion.job,
+      position: bestGlobalInsertion.position,
       serviceDate,
+      drivingMatrix,
       existing: false,
     });
 
-    assignments.push(assignment);
-
     const index = remainingJobs.findIndex(
-      (job) => String(job.id) === String(bestMove.job.id)
+      (job) => String(job.id) === String(bestGlobalInsertion.job.id)
     );
 
     if (index >= 0) remainingJobs.splice(index, 1);
+  }
+
+  for (const state of techStates) {
+    rebuildStateSchedule(state, serviceDate, drivingMatrix);
+  }
+
+  const assignments = [];
+
+  for (const state of techStates) {
+    for (const stop of state.route) {
+      assignments.push(makeAssignmentFromStateStop(state, stop));
+    }
   }
 
   return {
@@ -731,15 +812,37 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
       tech_name: state.techName,
       tech_email: state.tech.email || null,
       home_address: state.homeAddress,
-      home_corridor: state.homeCorridor,
-      active_corridors: Array.from(state.activeCorridors),
       services: getTechServiceKeys(state.tech),
       working_days: getWorkingDays(state.tech),
       work_start_time: state.tech.work_start_time || null,
-      work_end_time: state.tech.work_end_time || null,
       max_jobs_per_day: state.maxJobs,
       assigned_jobs_count: state.route.length,
-      stops: state.route,
+      estimated_drive_minutes_including_return_home: calculateRouteDriveMinutes(
+        state,
+        state.route,
+        drivingMatrix
+      ),
+      soft_time_penalty_score: calculateRouteTimePenalty(
+        state,
+        state.route,
+        serviceDate,
+        drivingMatrix
+      ),
+      stops: state.route.map((stop) => {
+        const job = stop.job || stop;
+
+        return {
+          jobId: job.id,
+          title: stop.title || job.title,
+          originalTitle: stop.originalTitle || job.title,
+          service_type: normalizeServiceKey(job.service_type),
+          address: job.address,
+          plannedStart: stop.plannedStart,
+          plannedEnd: stop.plannedEnd,
+          existing: Boolean(stop.existing),
+          routeOrder: stop.routeOrder,
+        };
+      }),
     })),
   };
 }
@@ -1011,11 +1114,19 @@ async function renameGoogleCalendarEvent({
     .from("jobs")
     .update({
       title: newTitle,
+      route_order: order,
     })
     .eq("id", job.id);
 
   if (updateError) {
-    throw updateError;
+    const retry = await supabaseAdmin
+      .from("jobs")
+      .update({
+        title: newTitle,
+      })
+      .eq("id", job.id);
+
+    if (retry.error) throw retry.error;
   }
 
   return {
@@ -1270,12 +1381,22 @@ export default async function handler(req, res) {
       });
     }
 
-    const { assignments, unassignedJobs, routes: plannedRoutes } = planRoutes(
-      jobs || [],
-      techs,
-      serviceDate,
-      forceReassign
-    );
+    const addressesForMatrix = [
+      ...(jobs || []).map((job) => job.address),
+      ...(techs || []).map((tech) => tech.home_address),
+    ].filter(Boolean);
+
+    const { matrix: drivingMatrix, diagnostics: distanceMatrixDiagnostics } =
+      await buildDrivingTimeMatrix(addressesForMatrix);
+
+    const { assignments, unassignedJobs, routes: plannedRoutes } =
+      await planRoutes(
+        jobs || [],
+        techs,
+        serviceDate,
+        forceReassign,
+        drivingMatrix
+      );
 
     const { routes, optimizationResults } = await optimizeAllRoutesWithGoogleMaps(
       plannedRoutes
@@ -1403,11 +1524,14 @@ export default async function handler(req, res) {
       success: true,
       service_date: serviceDate,
       force_reassign: forceReassign,
+      optimization_priority:
+        "Minimize total fleet driving first. Arrival windows are soft preferences, not hard appointment times.",
       total_jobs: jobs.length,
       total_technicians: techs.length,
       assigned_count: assignments.filter((a) => !a.skipped).length,
       preserved_count: assignments.filter((a) => a.skipped).length,
       unassigned_count: unassignedJobs.length,
+      distance_matrix_diagnostics: distanceMatrixDiagnostics,
       assignments,
       unassigned_jobs: unassignedJobs,
       routes,
