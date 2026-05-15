@@ -2,7 +2,6 @@ import { google } from "googleapis";
 import { supabaseAdmin } from "../../lib/supabaseAdmin";
 
 const DEFAULT_TRAVEL_BUFFER_MINUTES = 25;
-const TIME_WINDOW_GRACE_MINUTES = 90;
 
 const TARGET_CALENDAR_NAMES = [
   "Jiffy Lawn Bookings",
@@ -165,7 +164,7 @@ function getServiceDurationMinutes(serviceType, title, description) {
   const service = normalizeServiceKey(serviceType);
   const combined = normalizeText(`${title || ""} ${description || ""}`);
 
-  if (service === "bbq") return 120;
+  if (service === "bbq") return 150;
   if (service === "oven") return 120;
   if (service === "carpet") return 120;
   if (service === "windows") return 180;
@@ -175,7 +174,7 @@ function getServiceDurationMinutes(serviceType, title, description) {
   if (service === "lawn") return 90;
 
   if (service === "general") {
-    if (combined.includes("bbq")) return 120;
+    if (combined.includes("bbq")) return 150;
     if (combined.includes("oven")) return 120;
     if (combined.includes("carpet")) return 120;
     if (combined.includes("window")) return 180;
@@ -324,201 +323,62 @@ function sortJobsForPlanning(jobs, serviceDate) {
     });
 }
 
-function techCanTakeMoreJobs(state) {
-  return state.route.length < state.maxJobs;
-}
-
-function jobIsEligibleForTech(job, state, serviceDate) {
-  if (!techCanTakeMoreJobs(state)) return false;
-  if (!techCanDoService(state.tech, job)) return false;
-  if (!techWorksOnServiceDate(state.tech, serviceDate)) return false;
-  return true;
-}
-
-function calculateTimePenalty(job, plannedStart, serviceDate) {
-  const windowStart = parseTimeOnDate(
-    serviceDate,
-    job.arrival_window_start,
-    "09:00:00"
-  );
-
-  const windowEnd = parseTimeOnDate(
-    serviceDate,
-    job.arrival_window_end || job.arrival_window_start,
-    "12:00:00"
-  );
-
-  if (plannedStart >= windowStart && plannedStart <= windowEnd) {
-    return 0;
-  }
-
-  const minutesEarly = (windowStart.getTime() - plannedStart.getTime()) / 60000;
-  const minutesLate = (plannedStart.getTime() - windowEnd.getTime()) / 60000;
-
-  if (minutesEarly > 0) {
-    if (minutesEarly <= TIME_WINDOW_GRACE_MINUTES) return minutesEarly * 0.3;
-    return 250 + minutesEarly;
-  }
-
-  if (minutesLate > 0) {
-    if (minutesLate <= TIME_WINDOW_GRACE_MINUTES) return minutesLate * 0.8;
-    return 500 + minutesLate * 2;
-  }
-
-  return 0;
-}
-
-function proximityScoreForJobToAddress(job, address) {
-  const score = overlapScore(job.address || "", address || "");
-  const jobPostal = extractPostalPrefix(job.address || "");
-  const addressPostal = extractPostalPrefix(address || "");
-
-  const postalBoost = jobPostal && addressPostal && jobPostal === addressPostal ? 8 : 0;
-
-  return score * 10 + postalBoost;
-}
-
-function chooseClosestFirstJobForTech(state, remainingJobs, serviceDate) {
-  let best = null;
-
-  for (const job of remainingJobs) {
-    if (!jobIsEligibleForTech(job, state, serviceDate)) continue;
-
-    const plannedStart = state.nextAvailable;
-    const proximityScore = proximityScoreForJobToAddress(job, state.homeAddress);
-    const timePenalty = calculateTimePenalty(job, plannedStart, serviceDate);
-
-    const score = proximityScore - timePenalty * 0.2;
-
-    if (!best || score > best.score) {
-      best = {
-        job,
-        score,
-      };
-    }
-  }
-
-  return best?.job || null;
-}
-
-function chooseBestNextJobForTech(state, remainingJobs, serviceDate) {
-  let best = null;
-
-  const lastStopAddress =
-    state.route.length > 0
-      ? state.route[state.route.length - 1].address
-      : state.homeAddress;
-
-  for (const job of remainingJobs) {
-    if (!jobIsEligibleForTech(job, state, serviceDate)) continue;
-
-    const plannedStart = state.nextAvailable;
-    const routeProximity = proximityScoreForJobToAddress(job, lastStopAddress);
-    const homeProximity = proximityScoreForJobToAddress(job, state.homeAddress);
-    const anchorProximity = proximityScoreForJobToAddress(job, state.clusterAnchor);
-
-    const timePenalty = calculateTimePenalty(job, plannedStart, serviceDate);
-
-    const score =
-      routeProximity * 1.4 +
-      anchorProximity * 0.8 +
-      homeProximity * 0.2 -
-      timePenalty;
-
-    if (!best || score > best.score) {
-      best = {
-        job,
-        score,
-      };
-    }
-  }
-
-  return best?.job || null;
-}
-
-function chooseBestTechForRemainingJob(job, techStates, serviceDate) {
-  let best = null;
-
-  for (const state of techStates) {
-    if (!jobIsEligibleForTech(job, state, serviceDate)) continue;
-
-    const lastStopAddress =
-      state.route.length > 0
-        ? state.route[state.route.length - 1].address
-        : state.homeAddress;
-
-    const plannedStart = state.nextAvailable;
-
-    const routeProximity = proximityScoreForJobToAddress(job, lastStopAddress);
-    const homeProximity = proximityScoreForJobToAddress(job, state.homeAddress);
-    const anchorProximity = proximityScoreForJobToAddress(job, state.clusterAnchor);
-    const timePenalty = calculateTimePenalty(job, plannedStart, serviceDate);
-    const capacityPenalty = state.route.length * 5;
-
-    const score =
-      routeProximity * 1.4 +
-      anchorProximity * 0.9 +
-      homeProximity * 0.2 -
-      timePenalty -
-      capacityPenalty;
-
-    if (!best || score > best.score) {
-      best = {
-        state,
-        score,
-      };
-    }
-  }
-
-  return best;
-}
-
-function addJobToTechRoute({ state, job, serviceDate, existing = false }) {
+function chooseBestTech(job, techStates, serviceDate) {
   const durationMinutes = getServiceDurationMinutes(
     job.service_type,
     job.title,
     job.raw_description
   );
 
-  const plannedStart = state.nextAvailable;
-  const plannedEnd = addMinutes(plannedStart, durationMinutes);
-  const routeOrder = state.route.length + 1;
-
-  state.route.push({
-    jobId: job.id,
-    title: job.title,
-    originalTitle: job.title,
-    service_type: normalizeServiceKey(job.service_type),
-    address: job.address,
-    plannedStart: plannedStart.toISOString(),
-    plannedEnd: plannedEnd.toISOString(),
-    existing,
-    routeOrder,
+  const eligibleTechStates = techStates.filter((state) => {
+    if (!techCanDoService(state.tech, job)) return false;
+    if (!techWorksOnServiceDate(state.tech, serviceDate)) return false;
+    if (state.route.length >= state.maxJobs) return false;
+    return true;
   });
 
-  if (!state.clusterAnchor) {
-    state.clusterAnchor = job.address || state.homeAddress || "";
+  if (!eligibleTechStates.length) {
+    return null;
   }
 
-  state.nextAvailable = addMinutes(
-    plannedEnd,
-    DEFAULT_TRAVEL_BUFFER_MINUTES
-  );
+  let best = null;
 
-  return {
-    job_id: job.id,
-    tech_id: state.techId,
-    tech_name: state.techName,
-    tech_email: state.tech.email || null,
-    address: job.address,
-    service_type: normalizeServiceKey(job.service_type),
-    google_event_id: job.google_event_id || null,
-    calendar_name: job.calendar_name || null,
-    route_order: routeOrder,
-    planned_start: plannedStart.toISOString(),
-    planned_end: plannedEnd.toISOString(),
-    skipped: existing,
-  };
+  for (const state of eligibleTechStates) {
+    const lastStopAddress =
+      state.route.length > 0
+        ? state.route[state.route.length - 1].address
+        : state.homeAddress;
+
+    const anchorScore = overlapScore(job.address || "", state.clusterAnchor || "");
+    const routeScore = overlapScore(job.address || "", lastStopAddress || "");
+    const homeScore = overlapScore(job.address || "", state.homeAddress || "");
+
+    const proximityScore = anchorScore * 6 + routeScore * 4 + homeScore * 3;
+
+    const capacityPenalty = state.route.length * 20;
+    const travelPenalty = Math.max(
+      0,
+      DEFAULT_TRAVEL_BUFFER_MINUTES - routeScore * 3 - anchorScore * 2
+    );
+
+    const score =
+      capacityPenalty +
+      travelPenalty -
+      proximityScore * 5;
+
+    const plannedStart = state.nextAvailable;
+
+    if (!best || score < best.score) {
+      best = {
+        state,
+        score,
+        durationMinutes,
+        plannedStart,
+      };
+    }
+  }
+
+  return best;
 }
 
 function planRoutes(jobs, techs, serviceDate, forceReassign) {
@@ -527,147 +387,113 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
   const assignments = [];
   const unassignedJobs = [];
 
-  if (!forceReassign) {
-    for (const job of orderedJobs) {
-      if (!job?.address || !job?.arrival_window_start) continue;
-      if (!job.assigned_technician_id) continue;
+  for (const job of orderedJobs) {
+    if (!job?.address || !job?.arrival_window_start) {
+      continue;
+    }
 
+    if (job.assigned_technician_id && !forceReassign) {
       const existingTech = techStates.find(
         (state) => String(state.techId) === String(job.assigned_technician_id)
       );
 
-      if (!existingTech) continue;
-      if (!techWorksOnServiceDate(existingTech.tech, serviceDate)) continue;
+      if (existingTech) {
+        const plannedStart = existingTech.nextAvailable;
+        const durationMinutes = getServiceDurationMinutes(
+          job.service_type,
+          job.title,
+          job.raw_description
+        );
+        const plannedEnd = addMinutes(plannedStart, durationMinutes);
 
-      const assignment = addJobToTechRoute({
-        state: existingTech,
-        job,
-        serviceDate,
-        existing: true,
+        const routeOrder = existingTech.route.length + 1;
+
+        existingTech.route.push({
+          jobId: job.id,
+          title: job.title,
+          originalTitle: job.title,
+          service_type: normalizeServiceKey(job.service_type),
+          address: job.address,
+          plannedStart: plannedStart.toISOString(),
+          plannedEnd: plannedEnd.toISOString(),
+          existing: true,
+          routeOrder,
+        });
+
+        existingTech.nextAvailable = addMinutes(
+          plannedEnd,
+          DEFAULT_TRAVEL_BUFFER_MINUTES
+        );
+
+        assignments.push({
+          job_id: job.id,
+          tech_id: existingTech.techId,
+          tech_name: existingTech.techName,
+          tech_email: existingTech.tech.email || null,
+          address: job.address,
+          service_type: normalizeServiceKey(job.service_type),
+          google_event_id: job.google_event_id || null,
+          calendar_name: job.calendar_name || null,
+          route_order: routeOrder,
+          skipped: true,
+        });
+      }
+
+      continue;
+    }
+
+    const best = chooseBestTech(job, techStates, serviceDate);
+
+    if (!best) {
+      unassignedJobs.push({
+        job_id: job.id,
+        title: job.title,
+        address: job.address,
+        service_type: normalizeServiceKey(job.service_type),
+        reason: "No eligible technician found within skill/day/capacity constraints",
       });
-
-      assignments.push(assignment);
+      continue;
     }
-  }
 
-  const assignedJobIds = new Set(assignments.map((a) => String(a.job_id)));
+    const plannedStart = best.plannedStart;
+    const plannedEnd = addMinutes(plannedStart, best.durationMinutes);
 
-  const remainingJobs = orderedJobs.filter((job) => {
-    if (!job?.address || !job?.arrival_window_start) return false;
-    if (!forceReassign && job.assigned_technician_id) return false;
-    return !assignedJobIds.has(String(job.id));
-  });
+    const routeOrder = best.state.route.length + 1;
 
-  for (const state of techStates) {
-    if (!techWorksOnServiceDate(state.tech, serviceDate)) continue;
-    if (!techCanTakeMoreJobs(state)) continue;
-    if (state.route.length > 0) continue;
-
-    const firstJob = chooseClosestFirstJobForTech(
-      state,
-      remainingJobs,
-      serviceDate
-    );
-
-    if (!firstJob) continue;
-
-    const assignment = addJobToTechRoute({
-      state,
-      job: firstJob,
-      serviceDate,
+    best.state.route.push({
+      jobId: job.id,
+      title: job.title,
+      originalTitle: job.title,
+      service_type: normalizeServiceKey(job.service_type),
+      address: job.address,
+      plannedStart: plannedStart.toISOString(),
+      plannedEnd: plannedEnd.toISOString(),
       existing: false,
+      routeOrder,
     });
 
-    assignments.push(assignment);
+    if (!best.state.clusterAnchor) {
+      best.state.clusterAnchor = job.address || best.state.homeAddress || "";
+    }
 
-    const index = remainingJobs.findIndex(
-      (job) => String(job.id) === String(firstJob.id)
+    best.state.nextAvailable = addMinutes(
+      plannedEnd,
+      DEFAULT_TRAVEL_BUFFER_MINUTES
     );
 
-    if (index >= 0) remainingJobs.splice(index, 1);
-  }
-
-  let guard = 0;
-
-  while (remainingJobs.length > 0 && guard < 1000) {
-    guard += 1;
-
-    let bestMove = null;
-
-    for (const state of techStates) {
-      if (!techWorksOnServiceDate(state.tech, serviceDate)) continue;
-      if (!techCanTakeMoreJobs(state)) continue;
-
-      const nextJob = chooseBestNextJobForTech(
-        state,
-        remainingJobs,
-        serviceDate
-      );
-
-      if (!nextJob) continue;
-
-      const lastStopAddress =
-        state.route.length > 0
-          ? state.route[state.route.length - 1].address
-          : state.homeAddress;
-
-      const plannedStart = state.nextAvailable;
-      const routeProximity = proximityScoreForJobToAddress(nextJob, lastStopAddress);
-      const timePenalty = calculateTimePenalty(nextJob, plannedStart, serviceDate);
-      const score = routeProximity * 1.4 - timePenalty - state.route.length * 5;
-
-      if (!bestMove || score > bestMove.score) {
-        bestMove = {
-          state,
-          job: nextJob,
-          score,
-        };
-      }
-    }
-
-    if (!bestMove) {
-      const bestFallback = remainingJobs
-        .map((job) => ({
-          job,
-          pick: chooseBestTechForRemainingJob(job, techStates, serviceDate),
-        }))
-        .filter((x) => x.pick)
-        .sort((a, b) => b.pick.score - a.pick.score)[0];
-
-      if (!bestFallback) {
-        for (const job of remainingJobs) {
-          unassignedJobs.push({
-            job_id: job.id,
-            title: job.title,
-            address: job.address,
-            service_type: normalizeServiceKey(job.service_type),
-            reason: "No eligible technician found within skill/day/capacity constraints",
-          });
-        }
-        break;
-      }
-
-      bestMove = {
-        state: bestFallback.pick.state,
-        job: bestFallback.job,
-        score: bestFallback.pick.score,
-      };
-    }
-
-    const assignment = addJobToTechRoute({
-      state: bestMove.state,
-      job: bestMove.job,
-      serviceDate,
-      existing: false,
+    assignments.push({
+      job_id: job.id,
+      tech_id: best.state.techId,
+      tech_name: best.state.techName,
+      tech_email: best.state.tech.email || null,
+      address: job.address,
+      service_type: normalizeServiceKey(job.service_type),
+      google_event_id: job.google_event_id || null,
+      calendar_name: job.calendar_name || null,
+      route_order: routeOrder,
+      planned_start: plannedStart.toISOString(),
+      planned_end: plannedEnd.toISOString(),
     });
-
-    assignments.push(assignment);
-
-    const index = remainingJobs.findIndex(
-      (job) => String(job.id) === String(bestMove.job.id)
-    );
-
-    if (index >= 0) remainingJobs.splice(index, 1);
   }
 
   return {
@@ -686,6 +512,140 @@ function planRoutes(jobs, techs, serviceDate, forceReassign) {
       assigned_jobs_count: state.route.length,
       stops: state.route,
     })),
+  };
+}
+
+async function optimizeRouteWithGoogleMaps(route) {
+  const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+
+  if (!apiKey) {
+    return {
+      route,
+      result: {
+        success: false,
+        tech_name: route.tech_name,
+        reason: "Missing GOOGLE_MAPS_API_KEY, skipped optimization",
+      },
+    };
+  }
+
+  if (!route || !Array.isArray(route.stops) || route.stops.length <= 2) {
+    return {
+      route,
+      result: {
+        success: true,
+        tech_name: route?.tech_name || null,
+        reason: "Two or fewer stops, no optimization needed",
+      },
+    };
+  }
+
+  const validStops = route.stops.filter((stop) => stop.address);
+
+  if (validStops.length <= 2) {
+    return {
+      route,
+      result: {
+        success: true,
+        tech_name: route.tech_name,
+        reason: "Two or fewer valid addresses, no optimization needed",
+      },
+    };
+  }
+
+  const origin = route.home_address || validStops[0].address;
+  const destination = validStops[validStops.length - 1].address;
+
+  const waypointStops = validStops.slice(0, -1);
+
+  const params = new URLSearchParams({
+    origin,
+    destination,
+    waypoints: `optimize:true|${waypointStops.map((s) => s.address).join("|")}`,
+    mode: "driving",
+    key: apiKey,
+  });
+
+  const url = `https://maps.googleapis.com/maps/api/directions/json?${params.toString()}`;
+
+  try {
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data.status !== "OK") {
+      return {
+        route,
+        result: {
+          success: false,
+          tech_name: route.tech_name,
+          status: data.status,
+          reason: data.error_message || "Google Directions optimization failed",
+        },
+      };
+    }
+
+    const waypointOrder = data.routes?.[0]?.waypoint_order;
+
+    if (!Array.isArray(waypointOrder)) {
+      return {
+        route,
+        result: {
+          success: false,
+          tech_name: route.tech_name,
+          reason: "No waypoint_order returned by Google",
+        },
+      };
+    }
+
+    const reorderedWaypointStops = waypointOrder
+      .map((index) => waypointStops[index])
+      .filter(Boolean);
+
+    const finalStop = validStops[validStops.length - 1];
+
+    const optimizedStops = [...reorderedWaypointStops, finalStop].map(
+      (stop, index) => ({
+        ...stop,
+        routeOrder: index + 1,
+      })
+    );
+
+    route.stops = optimizedStops;
+    route.assigned_jobs_count = optimizedStops.length;
+
+    return {
+      route,
+      result: {
+        success: true,
+        tech_name: route.tech_name,
+        original_order: validStops.map((s) => s.title || s.address),
+        optimized_order: optimizedStops.map((s) => s.title || s.address),
+      },
+    };
+  } catch (err) {
+    return {
+      route,
+      result: {
+        success: false,
+        tech_name: route.tech_name,
+        reason: err.message || "Google Maps optimization failed",
+      },
+    };
+  }
+}
+
+async function optimizeAllRoutesWithGoogleMaps(routes) {
+  const optimizationResults = [];
+
+  for (let i = 0; i < routes.length; i++) {
+    const { route, result } = await optimizeRouteWithGoogleMaps(routes[i]);
+    routes[i] = route;
+    optimizationResults.push(result);
+  }
+
+  return {
+    routes,
+    optimizationResults,
   };
 }
 
@@ -823,19 +783,11 @@ async function renameGoogleCalendarEvent({
     .from("jobs")
     .update({
       title: newTitle,
-      route_order: order,
     })
     .eq("id", job.id);
 
   if (updateError) {
-    const retry = await supabaseAdmin
-      .from("jobs")
-      .update({
-        title: newTitle,
-      })
-      .eq("id", job.id);
-
-    if (retry.error) throw retry.error;
+    throw updateError;
   }
 
   return {
@@ -981,7 +933,7 @@ function buildRouteEmailBody({ serviceDate, route }) {
   const lines = [];
   lines.push(`Hi ${techName},`);
   lines.push("");
-  lines.push(`Here is your route for ${serviceDate}:`);
+  lines.push(`Here is your optimized route for ${serviceDate}:`);
   lines.push("");
 
   if (!route.stops || route.stops.length === 0) {
@@ -1031,7 +983,7 @@ async function sendRouteEmail({ gmailApi, fromEmail, route, serviceDate }) {
     return { success: false, reason: "Missing technician email" };
   }
 
-  const subject = `Your Route for ${serviceDate}`;
+  const subject = `Your Optimized Route for ${serviceDate}`;
   const body = buildRouteEmailBody({ serviceDate, route });
   const raw = buildRawEmail({
     from: fromEmail,
@@ -1090,11 +1042,15 @@ export default async function handler(req, res) {
       });
     }
 
-    const { assignments, unassignedJobs, routes } = planRoutes(
+    const { assignments, unassignedJobs, routes: plannedRoutes } = planRoutes(
       jobs || [],
       techs,
       serviceDate,
       forceReassign
+    );
+
+    const { routes, optimizationResults } = await optimizeAllRoutesWithGoogleMaps(
+      plannedRoutes
     );
 
     for (const assignment of assignments) {
@@ -1227,6 +1183,7 @@ export default async function handler(req, res) {
       assignments,
       unassigned_jobs: unassignedJobs,
       routes,
+      google_route_optimization_results: optimizationResults,
       google_invite_results: inviteResults,
       title_rewrite_results: titleRewriteResults,
       route_email_results: emailResults,
