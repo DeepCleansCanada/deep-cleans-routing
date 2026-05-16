@@ -278,6 +278,34 @@ function getTechMaxJobs(tech) {
   return 5;
 }
 
+function getTechRankBonus(tech) {
+  const rank = Number(tech.rank_position);
+
+  if (!Number.isFinite(rank) || rank <= 0) return 0;
+
+  return Math.max(0, 40 - rank * 4);
+}
+
+function getWorkloadBalancePenalty(state) {
+  const currentJobs = state.route.length;
+  const maxJobs = Math.max(1, state.maxJobs);
+  const loadRatio = currentJobs / maxJobs;
+
+  let penalty = 0;
+
+  if (currentJobs === 0) penalty -= 350;
+  else if (currentJobs === 1) penalty -= 180;
+  else if (currentJobs === 2) penalty -= 50;
+  else if (currentJobs === 3) penalty += 160;
+  else if (currentJobs === 4) penalty += 360;
+  else penalty += 700;
+
+  if (loadRatio >= 0.8) penalty += 500;
+  if (loadRatio >= 1) penalty += 1500;
+
+  return penalty;
+}
+
 function buildTechStates(techs, serviceDate) {
   return techs.map((tech, index) => {
     const shiftStart = getTechShiftStart(tech, serviceDate);
@@ -609,6 +637,9 @@ function findBestInsertionForJob(state, job, serviceDate, drivingMatrix) {
     drivingMatrix
   );
 
+  const workloadBalancePenalty = getWorkloadBalancePenalty(state);
+  const rankBonus = getTechRankBonus(state.tech);
+
   let best = null;
 
   for (let position = 0; position <= state.route.length; position++) {
@@ -639,7 +670,8 @@ function findBestInsertionForJob(state, job, serviceDate, drivingMatrix) {
     const score =
       driveIncrease * 15 +
       timePenaltyIncrease * 1.25 +
-      state.route.length * 2;
+      workloadBalancePenalty -
+      rankBonus;
 
     if (!best || score < best.score) {
       best = {
@@ -649,6 +681,8 @@ function findBestInsertionForJob(state, job, serviceDate, drivingMatrix) {
         score,
         driveIncrease,
         timePenaltyIncrease,
+        workloadBalancePenalty,
+        rankBonus,
       };
     }
   }
@@ -828,6 +862,8 @@ async function planRoutes(jobs, techs, serviceDate, forceReassign, drivingMatrix
         serviceDate,
         drivingMatrix
       ),
+      workload_balance_penalty: getWorkloadBalancePenalty(state),
+      rank_bonus: getTechRankBonus(state.tech),
       stops: state.route.map((stop) => {
         const job = stop.job || stop;
 
@@ -1525,7 +1561,7 @@ export default async function handler(req, res) {
       service_date: serviceDate,
       force_reassign: forceReassign,
       optimization_priority:
-        "Minimize total fleet driving first. Arrival windows are soft preferences, not hard appointment times.",
+        "Minimize total fleet driving, while using available eligible technicians before stacking one route.",
       total_jobs: jobs.length,
       total_technicians: techs.length,
       assigned_count: assignments.filter((a) => !a.skipped).length,
