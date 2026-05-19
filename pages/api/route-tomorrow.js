@@ -2,7 +2,6 @@ import { google } from "googleapis";
 import { supabaseAdmin } from "../../lib/supabaseAdmin";
 
 const DEFAULT_TRAVEL_BUFFER_MINUTES = 25;
-const CLUMP_DISTANCE_MINUTES = 15;
 const MAX_EARLY_MINUTES = 120;
 const MAX_LATE_MINUTES = 120;
 const FLEET_RETURN_HOME_SCORING = true;
@@ -355,16 +354,18 @@ function jobIsEligibleForTech(job, state, serviceDate) {
 }
 
 function buildTechStates(techs, serviceDate) {
-  return techs.map((tech) => ({
-    tech,
-    techId: tech.id,
-    techName: getTechName(tech),
-    rank: getTechRank(tech),
-    homeAddress: tech.home_address || "",
-    shiftStart: getTechShiftStart(tech, serviceDate),
-    route: [],
-    maxJobs: getTechMaxJobs(tech),
-  }));
+  return techs
+    .map((tech) => ({
+      tech,
+      techId: tech.id,
+      techName: getTechName(tech),
+      rank: getTechRank(tech),
+      homeAddress: tech.home_address || "",
+      shiftStart: getTechShiftStart(tech, serviceDate),
+      route: [],
+      maxJobs: getTechMaxJobs(tech),
+    }))
+    .sort((a, b) => a.rank - b.rank);
 }
 
 function sortJobsForPlanning(jobs, serviceDate) {
@@ -479,82 +480,60 @@ function routeTimeViolationMinutes(state, stops, serviceDate, matrix) {
   return violation;
 }
 
-function getLoadBalancePenalty(state, techStates, matrix, job) {
-  const availableEligibleTechs = techStates.filter(
-    (s) => s.route.length === 0 && jobIsEligibleForTech(job, s, new Date().toISOString().slice(0, 10))
+function getClosestEligibleJobForTech(state, remainingJobs, serviceDate, matrix) {
+  let bestJob = null;
+  let bestDistance = 999999;
+  let bestViolation = 999999;
+
+  const origin =
+    state.route.length === 0
+      ? state.homeAddress
+      : state.route[state.route.length - 1].address;
+
+  const currentViolation = routeTimeViolationMinutes(
+    state,
+    state.route,
+    serviceDate,
+    matrix
   );
 
-  const hasEmptyEligibleTech = availableEligibleTechs.length > 0;
-  const techAlreadyHasJob = state.route.length > 0;
-
-  if (!hasEmptyEligibleTech || !techAlreadyHasJob) return 0;
-
-  const closestExisting = state.route.reduce((min, stop) => {
-    return Math.min(min, getMatrixMinutes(matrix, stop.address, job.address));
-  }, 9999);
-
-  if (closestExisting <= CLUMP_DISTANCE_MINUTES) return -100;
-
-  return 900;
-}
-
-function getRankPenalty(state) {
-  return state.rank * 8;
-}
-
-function findBestInsertionForJob(state, techStates, job, serviceDate, matrix) {
-  if (!jobIsEligibleForTech(job, state, serviceDate)) return null;
-
-  const currentDrive = calculateRouteDriveMinutes(state, state.route, matrix);
-  const currentViolation = routeTimeViolationMinutes(state, state.route, serviceDate, matrix);
-
-  let best = null;
-
-  for (let position = 0; position <= state.route.length; position++) {
-    const candidateStop = buildStopFromJob(job, false);
+  for (const job of remainingJobs) {
+    if (!jobIsEligibleForTech(job, state, serviceDate)) continue;
 
     const candidateStops = [
-      ...state.route.slice(0, position),
-      candidateStop,
-      ...state.route.slice(position),
+      ...state.route,
+      buildStopFromJob(job, false),
     ];
 
-    const newDrive = calculateRouteDriveMinutes(state, candidateStops, matrix);
-    const newViolation = routeTimeViolationMinutes(state, candidateStops, serviceDate, matrix);
+    const candidateViolation = routeTimeViolationMinutes(
+      state,
+      candidateStops,
+      serviceDate,
+      matrix
+    );
 
-    const driveIncrease = newDrive - currentDrive;
-    const timeViolationIncrease = newViolation - currentViolation;
+    const addedViolation = candidateViolation - currentViolation;
 
-    const score =
-      driveIncrease * 20 +
-      timeViolationIncrease * 60 +
-      getLoadBalancePenalty(state, techStates, matrix, job) +
-      getRankPenalty(state);
+    if (addedViolation > 120) continue;
 
-    if (!best || score < best.score) {
-      best = {
-        state,
-        job,
-        position,
-        score,
-        driveIncrease,
-        timeViolationIncrease,
-      };
+    const distance = getMatrixMinutes(matrix, origin, job.address);
+
+    if (
+      distance < bestDistance ||
+      (distance === bestDistance && addedViolation < bestViolation)
+    ) {
+      bestDistance = distance;
+      bestViolation = addedViolation;
+      bestJob = job;
     }
   }
 
-  return best;
+  return bestJob;
 }
 
-function addJobToStateAtPosition({ state, job, position, serviceDate, matrix, existing = false }) {
+function addJobToStateAtEnd({ state, job, serviceDate, matrix, existing = false }) {
   const stop = buildStopFromJob(job, existing);
-
-  state.route = [
-    ...state.route.slice(0, position),
-    stop,
-    ...state.route.slice(position),
-  ];
-
+  state.route.push(stop);
   rebuildSchedule(state, serviceDate, matrix);
 }
 
@@ -592,10 +571,9 @@ async function planRoutes(jobs, techs, serviceDate, forceReassign, matrix) {
 
       if (!existingTech) continue;
 
-      addJobToStateAtPosition({
+      addJobToStateAtEnd({
         state: existingTech,
         job,
-        position: existingTech.route.length,
         serviceDate,
         matrix,
         existing: true,
@@ -618,43 +596,49 @@ async function planRoutes(jobs, techs, serviceDate, forceReassign, matrix) {
   });
 
   while (remainingJobs.length > 0) {
-    let bestMove = null;
+    let assignedThisRound = false;
 
-    for (const job of remainingJobs) {
-      for (const state of techStates) {
-        const candidate = findBestInsertionForJob(state, techStates, job, serviceDate, matrix);
-        if (!candidate) continue;
+    for (const state of techStates) {
+      if (state.route.length >= state.maxJobs) continue;
 
-        if (!bestMove || candidate.score < bestMove.score) {
-          bestMove = candidate;
-        }
-      }
+      const bestJob = getClosestEligibleJobForTech(
+        state,
+        remainingJobs,
+        serviceDate,
+        matrix
+      );
+
+      if (!bestJob) continue;
+
+      addJobToStateAtEnd({
+        state,
+        job: bestJob,
+        serviceDate,
+        matrix,
+        existing: false,
+      });
+
+      const index = remainingJobs.findIndex(
+        (j) => String(j.id) === String(bestJob.id)
+      );
+
+      if (index >= 0) remainingJobs.splice(index, 1);
+
+      assignedThisRound = true;
     }
 
-    if (!bestMove) {
-      for (const job of remainingJobs) {
-        unassignedJobs.push({
-          job_id: job.id,
-          title: job.title,
-          address: job.address,
-          service_type: normalizeServiceKey(job.service_type),
-          reason: "No eligible tech found based on service, day, capacity, or timing rules",
-        });
-      }
-      break;
-    }
+    if (!assignedThisRound) break;
+  }
 
-    addJobToStateAtPosition({
-      state: bestMove.state,
-      job: bestMove.job,
-      position: bestMove.position,
-      serviceDate,
-      matrix,
-      existing: false,
+  for (const job of remainingJobs) {
+    unassignedJobs.push({
+      job_id: job.id,
+      title: job.title,
+      address: job.address,
+      service_type: normalizeServiceKey(job.service_type),
+      reason:
+        "No eligible technician found based on services, availability, timing or capacity",
     });
-
-    const index = remainingJobs.findIndex((j) => String(j.id) === String(bestMove.job.id));
-    if (index >= 0) remainingJobs.splice(index, 1);
   }
 
   for (const state of techStates) rebuildSchedule(state, serviceDate, matrix);
@@ -1163,7 +1147,7 @@ export default async function handler(req, res) {
       service_date: serviceDate,
       force_reassign: forceReassign,
       routing_rules:
-        "Eligible techs only. Available techs get one job before stacking unless under 15 minutes apart. Arrival must stay within 2 hours early or 2 hours late. Ranking breaks close decisions. Fleet mileage and individual routes are both considered.",
+        "Rank round-robin. Each available eligible tech receives one closest job to home before anyone receives a second. Each next job is closest to that tech's previous stop. Time windows allow up to 2 hours early or 2 hours late.",
       total_jobs: jobs.length,
       total_technicians: techs.length,
       assigned_count: assignments.filter((a) => !a.skipped).length,
