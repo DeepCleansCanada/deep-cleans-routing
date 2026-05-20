@@ -19,23 +19,66 @@ const TARGET_CALENDAR_NAMES = [
 const CORRIDORS = [
   {
     name: "Hamilton / Burlington / Oakville",
-    keywords: ["hamilton", "burlington", "oakville", "dundas", "ancaster", "stoney creek", "waterdown"],
+    keywords: [
+      "hamilton",
+      "burlington",
+      "oakville",
+      "dundas",
+      "ancaster",
+      "stoney creek",
+      "waterdown",
+      "grimsby",
+    ],
   },
   {
     name: "Mississauga / Brampton / Milton",
-    keywords: ["mississauga", "brampton", "milton", "caledon", "georgetown"],
+    keywords: [
+      "mississauga",
+      "brampton",
+      "milton",
+      "caledon",
+      "georgetown",
+      "halton hills",
+    ],
   },
   {
     name: "Vaughan / Woodbridge / Richmond Hill",
-    keywords: ["vaughan", "woodbridge", "richmond hill", "thornhill", "maple", "concord"],
+    keywords: [
+      "vaughan",
+      "woodbridge",
+      "richmond hill",
+      "thornhill",
+      "maple",
+      "concord",
+      "king city",
+    ],
   },
   {
     name: "Pickering / Scarborough / Markham",
-    keywords: ["pickering", "scarborough", "markham", "ajax", "whitby", "oshawa", "stouffville"],
+    keywords: [
+      "pickering",
+      "scarborough",
+      "markham",
+      "ajax",
+      "whitby",
+      "oshawa",
+      "stouffville",
+      "uxbridge",
+    ],
   },
   {
     name: "Toronto Core / Etobicoke / North York",
-    keywords: ["toronto", "etobicoke", "north york", "east york", "york"],
+    keywords: [
+      "toronto",
+      "etobicoke",
+      "north york",
+      "east york",
+      "york",
+      "liberty village",
+      "high park",
+      "leslieville",
+      "beaches",
+    ],
   },
 ];
 
@@ -480,15 +523,40 @@ function routeTimeViolationMinutes(state, stops, serviceDate, matrix) {
   return violation;
 }
 
-function getClosestEligibleJobForTech(state, remainingJobs, serviceDate, matrix) {
+function groupJobsByCorridor(jobs) {
+  const groups = new Map();
+
+  for (const job of jobs) {
+    const corridor = getCorridor(job.address);
+
+    if (!groups.has(corridor)) {
+      groups.set(corridor, []);
+    }
+
+    groups.get(corridor).push(job);
+  }
+
+  return Array.from(groups.entries())
+    .map(([corridor, corridorJobs]) => ({
+      corridor,
+      jobs: corridorJobs,
+    }))
+    .sort((a, b) => {
+      if (b.jobs.length !== a.jobs.length) return b.jobs.length - a.jobs.length;
+      return a.corridor.localeCompare(b.corridor);
+    });
+}
+
+function getClosestEligibleJobFromOrigin({
+  state,
+  jobs,
+  origin,
+  serviceDate,
+  matrix,
+}) {
   let bestJob = null;
   let bestDistance = 999999;
   let bestViolation = 999999;
-
-  const origin =
-    state.route.length === 0
-      ? state.homeAddress
-      : state.route[state.route.length - 1].address;
 
   const currentViolation = routeTimeViolationMinutes(
     state,
@@ -497,7 +565,7 @@ function getClosestEligibleJobForTech(state, remainingJobs, serviceDate, matrix)
     matrix
   );
 
-  for (const job of remainingJobs) {
+  for (const job of jobs) {
     if (!jobIsEligibleForTech(job, state, serviceDate)) continue;
 
     const candidateStops = [
@@ -514,7 +582,7 @@ function getClosestEligibleJobForTech(state, remainingJobs, serviceDate, matrix)
 
     const addedViolation = candidateViolation - currentViolation;
 
-    if (addedViolation > 120) continue;
+    if (addedViolation > 0) continue;
 
     const distance = getMatrixMinutes(matrix, origin, job.address);
 
@@ -531,10 +599,127 @@ function getClosestEligibleJobForTech(state, remainingJobs, serviceDate, matrix)
   return bestJob;
 }
 
+function getTechClusterScore({
+  state,
+  corridorJobs,
+  serviceDate,
+  matrix,
+  corridor,
+}) {
+  if (state.route.length >= state.maxJobs) return null;
+
+  const eligibleJobs = corridorJobs.filter((job) =>
+    jobIsEligibleForTech(job, state, serviceDate)
+  );
+
+  if (!eligibleJobs.length) return null;
+
+  const currentCorridors = new Set(
+    state.route.map((stop) => stop.corridor || getCorridor(stop.address))
+  );
+
+  let distanceToCluster = 999999;
+
+  for (const job of eligibleJobs) {
+    distanceToCluster = Math.min(
+      distanceToCluster,
+      getMatrixMinutes(matrix, state.homeAddress, job.address)
+    );
+  }
+
+  const alreadyOwnsThisCorridor = currentCorridors.has(corridor);
+  const hasNoJobs = state.route.length === 0;
+
+  let score = distanceToCluster * 20;
+
+  score += state.rank * 8;
+
+  if (alreadyOwnsThisCorridor) score -= 10000;
+  if (hasNoJobs) score -= 500;
+  if (state.route.length > 0 && !alreadyOwnsThisCorridor) score += 1200;
+
+  return score;
+}
+
+function chooseBestTechForCorridor({
+  techStates,
+  corridorJobs,
+  serviceDate,
+  matrix,
+  corridor,
+}) {
+  let best = null;
+
+  for (const state of techStates) {
+    const score = getTechClusterScore({
+      state,
+      corridorJobs,
+      serviceDate,
+      matrix,
+      corridor,
+    });
+
+    if (score === null) continue;
+
+    if (!best || score < best.score) {
+      best = {
+        state,
+        score,
+      };
+    }
+  }
+
+  return best?.state || null;
+}
+
 function addJobToStateAtEnd({ state, job, serviceDate, matrix, existing = false }) {
   const stop = buildStopFromJob(job, existing);
   state.route.push(stop);
   rebuildSchedule(state, serviceDate, matrix);
+}
+
+function assignCorridorJobsToTech({
+  state,
+  corridorJobs,
+  serviceDate,
+  matrix,
+}) {
+  let assignedCount = 0;
+
+  while (corridorJobs.length > 0 && state.route.length < state.maxJobs) {
+    const origin =
+      state.route.length === 0
+        ? state.homeAddress
+        : state.route[state.route.length - 1].address;
+
+    const bestJob = getClosestEligibleJobFromOrigin({
+      state,
+      jobs: corridorJobs,
+      origin,
+      serviceDate,
+      matrix,
+    });
+
+    if (!bestJob) break;
+
+    addJobToStateAtEnd({
+      state,
+      job: bestJob,
+      serviceDate,
+      matrix,
+      existing: false,
+    });
+
+    const index = corridorJobs.findIndex(
+      (job) => String(job.id) === String(bestJob.id)
+    );
+
+    if (index >= 0) corridorJobs.splice(index, 1);
+
+    assignedCount += 1;
+  }
+
+  return assignedCount;
 }
 
 function makeAssignmentFromStop(state, stop) {
@@ -595,50 +780,43 @@ async function planRoutes(jobs, techs, serviceDate, forceReassign, matrix) {
     return true;
   });
 
-  while (remainingJobs.length > 0) {
-    let assignedThisRound = false;
+  const corridorGroups = groupJobsByCorridor(remainingJobs);
 
-    for (const state of techStates) {
-      if (state.route.length >= state.maxJobs) continue;
+  for (const group of corridorGroups) {
+    const corridorJobs = [...group.jobs];
 
-      const bestJob = getClosestEligibleJobForTech(
-        state,
-        remainingJobs,
-        serviceDate,
-        matrix
-      );
-
-      if (!bestJob) continue;
-
-      addJobToStateAtEnd({
-        state,
-        job: bestJob,
+    while (corridorJobs.length > 0) {
+      const bestTech = chooseBestTechForCorridor({
+        techStates,
+        corridorJobs,
         serviceDate,
         matrix,
-        existing: false,
+        corridor: group.corridor,
       });
 
-      const index = remainingJobs.findIndex(
-        (j) => String(j.id) === String(bestJob.id)
-      );
+      if (!bestTech) break;
 
-      if (index >= 0) remainingJobs.splice(index, 1);
+      const assignedCount = assignCorridorJobsToTech({
+        state: bestTech,
+        corridorJobs,
+        serviceDate,
+        matrix,
+      });
 
-      assignedThisRound = true;
+      if (assignedCount === 0) break;
     }
 
-    if (!assignedThisRound) break;
-  }
-
-  for (const job of remainingJobs) {
-    unassignedJobs.push({
-      job_id: job.id,
-      title: job.title,
-      address: job.address,
-      service_type: normalizeServiceKey(job.service_type),
-      reason:
-        "No eligible technician found based on services, availability, timing or capacity",
-    });
+    for (const leftover of corridorJobs) {
+      unassignedJobs.push({
+        job_id: leftover.id,
+        title: leftover.title,
+        address: leftover.address,
+        service_type: normalizeServiceKey(leftover.service_type),
+        corridor: group.corridor,
+        reason:
+          "Could not assign within service, availability, capacity, clustering, or time-window rules",
+      });
+    }
   }
 
   for (const state of techStates) rebuildSchedule(state, serviceDate, matrix);
@@ -664,8 +842,20 @@ async function planRoutes(jobs, techs, serviceDate, forceReassign, matrix) {
       working_days: getWorkingDays(state.tech),
       max_jobs_per_day: state.maxJobs,
       assigned_jobs_count: state.route.length,
-      estimated_drive_minutes_including_return_home: calculateRouteDriveMinutes(state, state.route, matrix),
-      time_violation_minutes: routeTimeViolationMinutes(state, state.route, serviceDate, matrix),
+      assigned_corridors: Array.from(
+        new Set(state.route.map((stop) => stop.corridor || getCorridor(stop.address)))
+      ),
+      estimated_drive_minutes_including_return_home: calculateRouteDriveMinutes(
+        state,
+        state.route,
+        matrix
+      ),
+      time_violation_minutes: routeTimeViolationMinutes(
+        state,
+        state.route,
+        serviceDate,
+        matrix
+      ),
       stops: state.route.map((stop) => {
         const job = stop.job || stop;
 
@@ -1147,7 +1337,7 @@ export default async function handler(req, res) {
       service_date: serviceDate,
       force_reassign: forceReassign,
       routing_rules:
-        "Rank round-robin. Each available eligible tech receives one closest job to home before anyone receives a second. Each next job is closest to that tech's previous stop. Time windows allow up to 2 hours early or 2 hours late.",
+        "Cluster-first. Jobs in the same corridor are kept together whenever possible. A corridor is assigned to the best eligible tech based on proximity, rank, current route, capacity, service skills, availability, and time-window limits. Inside each cluster, stops are ordered closest-to-current-location.",
       total_jobs: jobs.length,
       total_technicians: techs.length,
       assigned_count: assignments.filter((a) => !a.skipped).length,
